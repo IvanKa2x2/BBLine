@@ -14,7 +14,7 @@
 ## ⚙️ Установка
 
 ```bash
-git clone https://github.com/yourusername/BBLine.git
+git clone https://github.com/IvanKa2x2/BBLine.git
 cd BBLine
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
