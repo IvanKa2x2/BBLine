@@ -37,6 +37,9 @@ def create_database(db_path='db/bbline.sqlite'):
         start_stack_bb REAL,
         end_stack_bb REAL,
         won_bb REAL,
+        invested_bb REAL,
+        net_bb REAL,
+        preflop_action TEXT,
         PRIMARY KEY (hand_id, seat),
         FOREIGN KEY (hand_id) REFERENCES hands(hand_id)
     )

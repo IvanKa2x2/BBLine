@@ -4,6 +4,7 @@ import re
 import sqlite3
 from datetime import datetime
 import sys, os
+import glob
 
 # Добавляем путь до utils
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -239,7 +240,7 @@ def parse_and_insert_hands(filepath):
             for player in players:
                 print(f"[INSERT] {player['player_id']} | seat {player['seat']} → {player['player_pos']}")
                 c.execute("""
-                INSERT OR REPLACE INTO players
+                INSERT OR IGNORE INTO players
                         (hand_id, seat, player_id, start_stack_bb, player_pos)
                     VALUES (?, ?, ?, ?, ?)
                 """, (
@@ -286,6 +287,46 @@ def parse_and_insert_hands(filepath):
                     SET end_stack_bb = ?, won_bb = ?
                     WHERE hand_id = ? AND seat = ?
                 """, (end_stack, won_bb, hand_id, seat))
+            # Находим Hero seat
+            hero_seat = next((p["seat"] for p in players if "Hero" in p["player_id"]), None)
+            hero_player = next((p for p in players if "Hero" in p["player_id"]), None)
+
+            if hero_seat is not None and hero_player is not None:
+                start_stack_bb = hero_player["start_stack_bb"] / bb
+                won_bb = seat_summary.get(hero_seat, (None, 0.0))[1]
+                invested_bb = sum(
+                    a["amount_bb"]
+                    for a in parsed_actions
+                    if a["street"] == "P" and seat_map.get(a["player_id"]) == hero_seat and a["action"] in ("call", "bet", "raise")
+                )
+                first_action = next(
+                    (a["action"]
+                    for a in parsed_actions
+                    if a["street"] == "P" and seat_map.get(a["player_id"]) == hero_seat),
+                    None
+                )
+
+                end_stack_bb = start_stack_bb - invested_bb + won_bb
+                net_bb = won_bb - invested_bb
+
+                c.execute("""
+                    UPDATE players
+                    SET invested_bb   = ?,
+                        net_bb        = ?,
+                        preflop_action= ?,
+                        end_stack_bb  = ?,
+                        won_bb        = COALESCE(won_bb , 0)  -- если уже есть – не затираем
+                    WHERE hand_id = ? AND seat = ?
+                """, (
+                    invested_bb,
+                    net_bb,
+                    first_action,
+                    end_stack_bb,
+                    hand_id,
+                    hero_seat
+                ))
+
+
 
         except Exception as e:
             print(f"❌ Ошибка в раздаче: {hand[:2]} — {e}")
@@ -294,6 +335,19 @@ def parse_and_insert_hands(filepath):
     conn.close()
     print("✅ Все руки обработаны и добавлены в базу.")
 
-# Запуск
+
+def find_and_parse_all_txt_files(folder="data/raw"):
+    txt_files = glob.glob(os.path.join(folder, "**", "*.txt"), recursive=True)
+    print(f"📁 Найдено {len(txt_files)} текстовых файлов для обработки")
+    
+    for path in txt_files:
+        print(f"🧾 Обрабатываем: {path}")
+        try:
+            parse_and_insert_hands(path)
+            os.remove(path)
+            print(f"🗑️ Удалён: {path}")
+        except Exception as e:
+            print(f"❌ Ошибка при обработке {path}: {e}")
+
 if __name__ == "__main__":
-    parse_and_insert_hands("data/raw/GG20250509-1348 - NLHWhite65 - 0.01 - 0.02 - 6max.txt")
+    find_and_parse_all_txt_files("data/raw")
