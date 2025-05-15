@@ -1,6 +1,6 @@
 """
 Экспорт полного датасета раздач Hero → JSONL
-Структура строго соответствует таблице из гайда.
+Формат готов для анализа и форматирования для GPT.
 """
 
 import os, json, sqlite3
@@ -29,12 +29,11 @@ def build_aggregates():
     return {
         "VPIP": round((cnt["call"] + cnt["raise"]) / total * 100, 1),
         "PFR":  round(cnt["raise"] / total * 100, 1),
-        # минимальный набор, остальное считаешь по желанию
     }
 
 
 def main():
-    # кеш: hand_id → базовые поля раздачи
+    # базовая инфа о раздаче
     hand_base = {}
     for r in fetchall("""
         SELECT hand_id, date_ts, sb, bb,
@@ -56,7 +55,7 @@ def main():
     # hero‑карты
     hero_cards = {r["hand_id"]: dict(r) for r in fetchall("SELECT * FROM hero_cards")}
 
-    # действия: hand_id → список действий (упорядоченных)
+    # действия
     actions_by_hand = defaultdict(list)
     for r in fetchall("SELECT hand_id, street, seat, action, amount_bb FROM actions ORDER BY action_id"):
         actions_by_hand[r["hand_id"]].append(dict(r))
@@ -65,33 +64,41 @@ def main():
     players_by_hand = defaultdict(list)
     for r in fetchall("""
         SELECT hand_id, seat, player_pos, player_id,
-               start_stack_bb, end_stack_bb
+               start_stack_bb, end_stack_bb, invested_bb, net_bb, preflop_action
         FROM players
     """):
         players_by_hand[r["hand_id"]].append(dict(r))
 
-    # агрегаты сразу
+    # флаги
+    flags_by_hand = {r["hand_id"]: dict(r) for r in fetchall("SELECT * FROM flags")}
+
+    # борды
+    board_by_hand = {
+        r["hand_id"]: [r["flop1"], r["flop2"], r["flop3"], r["turn"], r["river"]]
+        for r in fetchall("SELECT * FROM board")
+    }
+
+    # агрегаты
     aggregates = build_aggregates()
 
     with open(OUT_FILE, "w", encoding="utf-8") as f_out:
         for hand_id, base in hand_base.items():
             hero_info = next((p for p in players_by_hand[hand_id] if "Hero" in p["player_id"]), None)
-            if not hero_info:   # пропускаем, если Hero нет
+            if not hero_info:
                 continue
 
-            # hero‑блок
             hero_block = {
                 "card1": hero_cards.get(hand_id, {}).get("card1"),
                 "card2": hero_cards.get(hand_id, {}).get("card2"),
                 "suited": hero_cards.get(hand_id, {}).get("suited"),
-                "start_stack_bb": hero_info["start_stack_bb"],
+                "start_stack_bb": hero_info.get("start_stack_bb"),
                 "end_stack_bb":   hero_info.get("end_stack_bb"),
                 "invested_bb":    hero_info.get("invested_bb"),
                 "net_bb":         hero_info.get("net_bb"),
                 "preflop_action": hero_info.get("preflop_action"),
+                "seat":           hero_info.get("seat")
             }
 
-            # действия и pot‑size‑after
             pot = 0.0
             acts = []
             for a in actions_by_hand[hand_id]:
@@ -104,12 +111,12 @@ def main():
                     "pot_size_bb_after": round(pot, 2),
                 })
 
-            # оппоненты
             opps = [
                 {
                     "player_pos": p["player_pos"],
                     "stack_bb":   p["start_stack_bb"],
-                    # action sequence можно добавить, если нужно
+                    "seat":       p["seat"],
+                    "player_id":  p["player_id"]
                 }
                 for p in players_by_hand[hand_id] if "Hero" not in p["player_id"]
             ]
@@ -117,10 +124,11 @@ def main():
             out = {
                 "hand":      base,
                 "hero":      hero_block,
+                "board":     board_by_hand.get(hand_id, []),
+                "flags":     flags_by_hand.get(hand_id, {}),
                 "actions":   acts,
                 "opponents": opps,
-                "aggregates": aggregates,   # одинаковы для всех, можно вынести
-                # "benchmark": {...}        # добавь, если есть сторонний файл GTO
+                "aggregates": aggregates
             }
             f_out.write(json.dumps(out, ensure_ascii=False) + "\n")
 

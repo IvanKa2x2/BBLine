@@ -33,6 +33,28 @@ def parse_gg_file(filepath):
 
     return hands
 
+def get_pos(seat, btn_seat, seats_list):
+    """
+    Универсально определяет позицию по seat, btn_seat и списку всех seat за столом.
+    Работает для 2-6 макс.
+    """
+    n = len(seats_list)
+    pos_map = {
+        6: ['BTN', 'SB', 'BB', 'UTG', 'MP', 'CO'],
+        5: ['BTN', 'SB', 'BB', 'UTG', 'CO'],
+        4: ['BTN', 'SB', 'BB', 'UTG'],
+        3: ['BTN', 'SB', 'BB'],
+        2: ['BTN', 'BB']
+    }
+    if n not in pos_map:
+        return "?"
+    sorted_seats = sorted(seats_list)
+    btn_idx = sorted_seats.index(btn_seat)
+    order = [sorted_seats[(btn_idx + i) % n] for i in range(n)]
+    seat2pos = {seat: pos for seat, pos in zip(order, pos_map[n])}
+    return seat2pos.get(seat, "?")
+
+
 def parse_hand_meta(hand_lines):
     btn_seat = None
     hero_seat = None
@@ -87,7 +109,13 @@ def parse_players(hand_lines, btn_seat=None):
     Работает при любом количестве игроков (2‑6) и не падает, если
     описания сидящего на баттоне нет среди строк «Seat X: …».
     """
-    pos_names = ['BTN', 'SB', 'BB', 'UTG', 'MP', 'CO']  # для 6‑max
+
+    # 1. Собираем все seat
+    seats = []
+    for line in hand_lines:
+        m = re.match(r"Seat (\d+): (.+?) \(\$(\d+\.\d{2})", line)
+        if m:
+            seats.append(int(m.group(1)))
 
     players = []
     for line in hand_lines:
@@ -99,18 +127,15 @@ def parse_players(hand_lines, btn_seat=None):
         name = m.group(2).strip()
         stack = float(m.group(3))
 
-        # позиция по умолчанию неизвестна
-        player_pos = None
-
-        if btn_seat:  # баттон известен
-            diff = (seat - btn_seat) % 6          # 0‑5
-            player_pos = pos_names[diff]          # BTN, SB, BB, …
+        player_pos = "?"
+        if btn_seat and seats:
+            player_pos = get_pos(seat, btn_seat, seats)
 
         players.append({
             "seat": seat,
             "player_id": name,
             "start_stack_bb": stack,
-            "player_pos": player_pos or "?"
+            "player_pos": player_pos
         })
 
     return players
@@ -147,46 +172,79 @@ def parse_hero_cards(hand_lines):
             return card1, card2, suited
     return None, None, None
 
-# Парсинг действий по улицам
-def parse_actions(hand_lines, bb):
+# Парсинг действий по улицам с гибким антидубликатором
+def parse_actions(hand_lines, bb, strict_dedup=True):
     actions = []
+    seen = set()
     current_street = "P"
+
     street_markers = {
-        "*** FLOP ***": "F",
-        "*** TURN ***": "T",
+        "*** FLOP ***":  "F",
+        "*** TURN ***":  "T",
         "*** RIVER ***": "R",
         "*** SHOW DOWN ***": None,
-        "*** SUMMARY ***": None
+        "*** SUMMARY ***":   None
     }
 
-    for line in hand_lines:
+    for i, line in enumerate(hand_lines):
         for marker, street in street_markers.items():
             if line.startswith(marker):
                 current_street = street
                 break
 
-        match = re.match(r"(.+?): (bets|calls|raises|checks|folds)( to)? ?\$?([\d\.]+)?", line)
-        if match and current_street:
-            player = match.group(1).strip()
-            action_type = match.group(2)
-            amount = float(match.group(4)) if match.group(4) else 0.0
+        m = re.match(r"(.+?): (bets|calls|raises|checks|folds)( to)? ?\$?([\d\.]+)?", line)
+        if not (m and current_street):
+            continue
 
-            action_map = {
-                "bets": "bet",
-                "calls": "call",
-                "raises": "raise",
-                "checks": "check",
-                "folds": "fold"
-            }
+        player = m.group(1).strip()
+        verb   = m.group(2)
+        amount = float(m.group(4)) if m.group(4) else 0.0
 
-            actions.append({
-                "player_id": player,
-                "action": action_map[action_type],
-                "amount_bb": amount / bb if amount else 0.0,
-                "street": current_street
-            })
+        action_map = {
+            "bets":   "bet",
+            "calls":  "call",
+            "raises": "raise",
+            "checks": "check",
+            "folds":  "fold"
+        }
+
+        action_name = action_map[verb]
+        amount_bb   = amount / bb if amount else 0.0
+
+        # --- формируем ключ ---
+        key = (current_street, player, action_name, amount_bb)
+        if strict_dedup:
+            if key in seen:
+                continue  # дубликат — игнорим
+            seen.add(key)
+        # ----------------------
+
+        actions.append({
+            "player_id":  player,
+            "action":     action_name,
+            "amount_bb":  amount_bb,
+            "street":     current_street
+        })
 
     return actions
+
+# Парсинг board: flop, turn, river
+def parse_board(hand_lines):
+    flop_cards = [None, None, None]
+    turn_card = None
+    river_card = None
+    for line in hand_lines:
+        m = re.match(r"\*\*\* FLOP \*\*\* \[(\w\w) (\w\w) (\w\w)\]", line)
+        if m:
+            flop_cards = [m.group(1), m.group(2), m.group(3)]
+        m = re.match(r"\*\*\* TURN \*\*\* \[\w\w \w\w \w\w\] \[(\w\w)\]", line)
+        if m:
+            turn_card = m.group(1)
+        m = re.match(r"\*\*\* RIVER \*\*\* \[\w\w \w\w \w\w \w\w\] \[(\w\w)\]", line)
+        if m:
+            river_card = m.group(1)
+    return flop_cards[0], flop_cards[1], flop_cards[2], turn_card, river_card
+# -----------------------------
 
 # Главная функция обработки всех раздач
 def parse_and_insert_hands(filepath):
@@ -211,6 +269,13 @@ def parse_and_insert_hands(filepath):
                 raise ValueError("Не удалось найти необходимые поля")
 
             hand_id = hand_id_match.group(1)
+            # Пропускаем, если такая раздача уже есть в базе
+            c.execute("SELECT 1 FROM hands WHERE hand_id = ?", (hand_id,))
+            if c.fetchone():
+                print(f"⏩ Пропущено: {hand_id} уже в базе")
+                continue
+
+
             table_name = table_name_match.group(1)
             dt = datetime.strptime(timestamp_match.group(1), "%Y/%m/%d %H:%M:%S")
             timestamp = int(dt.timestamp())
@@ -262,7 +327,7 @@ def parse_and_insert_hands(filepath):
 
             # Парсим действия
             seat_map = {p["player_id"]: p["seat"] for p in players}
-            parsed_actions = parse_actions(hand, bb)
+            parsed_actions = parse_actions(hand, bb, strict_dedup=True)
 
             for act in parsed_actions:
                 seat = seat_map.get(act["player_id"])
@@ -278,6 +343,18 @@ def parse_and_insert_hands(filepath):
                     act["action"],
                     act["amount_bb"]
                 ))
+                        # --- вставляем board в таблицу ---
+            flop1, flop2, flop3, turn_card, river_card = parse_board(hand)
+            c.execute("""
+                INSERT OR IGNORE INTO board
+                    (hand_id, flop1, flop2, flop3, turn, river)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                hand_id,
+                flop1, flop2, flop3,
+                turn_card,
+                river_card
+            ))
 
             # Обновляем выигрыши
             seat_summary = parse_summary_winnings(hand, bb)

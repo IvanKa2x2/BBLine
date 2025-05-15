@@ -1,5 +1,3 @@
-# utils/db_schema.py
-
 import sqlite3
 import os
 
@@ -94,9 +92,25 @@ def create_database(db_path='db/bbline.sqlite'):
     )
     """)
 
+    # ---------- ИНДЕКСЫ ----------
+    c.executescript("""
+    CREATE INDEX IF NOT EXISTS idx_actions_hand_id     ON actions(hand_id);
+    CREATE INDEX IF NOT EXISTS idx_players_hand_id     ON players(hand_id);
+    CREATE INDEX IF NOT EXISTS idx_hero_cards_hand_id  ON hero_cards(hand_id);
+    CREATE INDEX IF NOT EXISTS idx_board_hand_id       ON board(hand_id);
+    CREATE INDEX IF NOT EXISTS idx_flags_hand_id       ON flags(hand_id);
+    CREATE INDEX IF NOT EXISTS idx_hands_date_ts       ON hands(date_ts);
+    CREATE INDEX IF NOT EXISTS idx_players_player_pos  ON players(player_pos);
+    CREATE INDEX IF NOT EXISTS idx_players_player_id   ON players(player_id);
+
+    -- Защита от дублей (если захочешь убрать дубликаты на уровне SQLite)
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_actions ON actions(hand_id, street, seat, action, amount_bb);
+    """)
+    # --------------------------------
+
     conn.commit()
     conn.close()
-    print("✅ База данных создана по структуре.")
+    print("✅ База данных создана по структуре и проиндексирована.")
 
 if __name__ == "__main__":
     create_database()
