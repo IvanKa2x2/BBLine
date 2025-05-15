@@ -1,4 +1,4 @@
-# analysis/street_loss.py
+# analysis/street_loss.py v2
 """
 Отчёт: Потери Hero по улицам (Preflop / Flop / Turn / River)
 """
