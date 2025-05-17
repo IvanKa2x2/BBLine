@@ -40,10 +40,6 @@ def parse_gg_file(filepath):
 
 
 def get_pos(seat, btn_seat, seats_list):
-    """
-    Универсально определяет позицию по seat, btn_seat и списку всех seat за столом.
-    Работает для 2-6 макс.
-    """
     n = len(seats_list)
     pos_map = {
         6: ["BTN", "SB", "BB", "UTG", "MP", "CO"],
@@ -52,8 +48,8 @@ def get_pos(seat, btn_seat, seats_list):
         3: ["BTN", "SB", "BB"],
         2: ["BTN", "BB"],
     }
-    if n not in pos_map:
-        return "?"
+    if n not in pos_map or btn_seat not in seats_list:
+        return "?"   # вот это ключ! Не падаем, а просто ставим неизвестную позицию
     sorted_seats = sorted(seats_list)
     btn_idx = sorted_seats.index(btn_seat)
     order = [sorted_seats[(btn_idx + i) % n] for i in range(n)]

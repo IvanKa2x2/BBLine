@@ -69,6 +69,43 @@ def stack_timeline(limit=15):
         ["Hand_id", "Stack_bb"],
         [(r["hand_id"], r["end_stack_bb"]) for r in rows[-limit:]],
     )
+def top_losing_hands(limit=10):
+    rows = fetchall(
+        """
+        SELECT h.hand_id, p.net_bb, h.date_ts
+        FROM players p
+        JOIN hands h ON h.hand_id = p.hand_id
+        WHERE p.player_id LIKE '%Hero%'
+        ORDER BY p.net_bb ASC
+        LIMIT ?
+        """, (limit,)
+    )
+    print_table(
+        f"Топ {limit} минусовых рук",
+        ["Hand_id", "Net BB", "Date"],
+        [(r["hand_id"], r["net_bb"], r["date_ts"]) for r in rows],
+    )
+def vpip_pfr():
+    row = fetchall(
+        """
+        SELECT 
+          COUNT(DISTINCT p.hand_id) AS total_hands,
+          COUNT(DISTINCT CASE WHEN a.action IN ('call','raise','bet') THEN p.hand_id END) AS vpip,
+          COUNT(DISTINCT CASE WHEN a.action IN ('raise','bet') THEN p.hand_id END) AS pfr
+        FROM players p
+        JOIN actions a ON a.hand_id = p.hand_id AND a.seat = p.seat
+        WHERE p.player_id LIKE '%Hero%'
+          AND a.street = 'P'
+        """
+    )[0]
+    if not row or row["total_hands"] == 0:
+        print("❌ Нет данных по Hero для VPIP/PFR")
+        return
+    total = row["total_hands"]
+    vpip = row["vpip"]
+    pfr = row["pfr"]
+    print(f"\nVPIP: {vpip} / {total} = {vpip/total*100:.1f}%")
+    print(f"PFR : {pfr} / {total} = {pfr/total*100:.1f}%")
 
 
 if __name__ == "__main__":
@@ -76,3 +113,5 @@ if __name__ == "__main__":
     by_position()
     by_action()
     stack_timeline()
+    top_losing_hands()
+    vpip_pfr()
