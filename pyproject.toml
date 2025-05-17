@@ -1,0 +1,49 @@
+[project]
+name = "bbline"
+version = "0.1.0"
+description = "Poker hand analyzer (Hand2Note-lite, чистый анализ твоей игры)"
+authors = [
+    {name = "Ledonec22", email = "your@email.com"}
+]
+readme = "README.md"
+requires-python = ">=3.9"
+license = {file = "LICENSE"}
+dependencies = [
+    "typer>=0.9",
+    # если используешь pandas/duckdb/sqlalchemy/pytest и т.д. — добавь сюда
+    # "pandas>=2.2",
+    # "duckdb>=0.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "black",
+    # добавь ещё, если нужны
+]
+
+[project.scripts]
+bbline = "bbline:app"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Говорим setuptools, что код в src/
+package-dir = {"" = "src"}
+packages = ["analysis", "core", "db", "export", "reports"]
+# Если export и reports нужны как импорты, иначе можно не включать
+
+[tool.setuptools.package-data]
+# если нужны статические файлы внутри analysis, core и т.п.
+# "analysis" = ["*.sql", "*.txt"]
+
+[tool.ruff]
+# Настройки для ruff (линтер)
+line-length = 100
+target-version = "py39"
+
+[tool.black]
+line-length = 100

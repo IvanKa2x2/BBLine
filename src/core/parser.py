@@ -9,6 +9,16 @@ from datetime import datetime
 import sys
 import os
 import glob
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("parser_errors.log", encoding="utf-8"),
+        logging.StreamHandler()  # чтобы видеть print/log в терминале
+    ]
+)
 
 # Добавляем путь до utils
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -260,6 +270,7 @@ def parse_and_insert_hands(filepath):
     c = conn.cursor()
 
     all_hands = parse_gg_file(filepath)
+    logging.info(f"🔍 Найдено {len(all_hands)} раздач в файле {filepath}")
     print(f"🔍 Найдено {len(all_hands)} раздач")
 
     for hand in all_hands:
@@ -283,6 +294,7 @@ def parse_and_insert_hands(filepath):
             # Пропускаем, если такая раздача уже есть в базе
             c.execute("SELECT 1 FROM hands WHERE hand_id = ?", (hand_id,))
             if c.fetchone():
+                logging.info(f"⏩ Пропущено: {hand_id} уже в базе")
                 print(f"⏩ Пропущено: {hand_id} уже в базе")
                 continue
 
@@ -406,16 +418,13 @@ def parse_and_insert_hands(filepath):
                 invested_bb = sum(
                     a["amount_bb"]
                     for a in parsed_actions
-                    if a["street"] == "P"
-                    and seat_map.get(a["player_id"]) == hero_seat
-                    and a["action"] in ("call", "bet", "raise")
+                    if seat_map.get(a["player_id"]) == hero_seat and a["action"] in ("call", "bet", "raise")
                 )
                 first_action = next(
                     (
                         a["action"]
                         for a in parsed_actions
-                        if a["street"] == "P"
-                        and seat_map.get(a["player_id"]) == hero_seat
+                        if seat_map.get(a["player_id"]) == hero_seat and a["street"] == "P"
                     ),
                     None,
                 )
@@ -430,9 +439,9 @@ def parse_and_insert_hands(filepath):
                         net_bb        = ?,
                         preflop_action= ?,
                         end_stack_bb  = ?,
-                        won_bb        = COALESCE(won_bb , 0)  -- если уже есть – не затираем
+                        won_bb        = COALESCE(won_bb , 0)
                     WHERE hand_id = ? AND seat = ?
-                """,
+                    """,
                     (
                         invested_bb,
                         net_bb,
@@ -443,11 +452,14 @@ def parse_and_insert_hands(filepath):
                     ),
                 )
 
+
         except Exception as e:
+            logging.warning(f"Ошибка в раздаче: {hand[:2]} — {e}")
             print(f"❌ Ошибка в раздаче: {hand[:2]} — {e}")
 
     conn.commit()
     conn.close()
+    logging.info(f"✅ Все руки из {filepath} обработаны и добавлены в базу.")
     print("✅ Все руки обработаны и добавлены в базу.")
 
 

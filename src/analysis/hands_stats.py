@@ -1,5 +1,5 @@
 # analysis/hands_stats.py анализ по рукам (AJo, TT, AKs...)
-from utils import fetchall, normalize, print_table
+from analysis.utils import fetchall, normalize, print_table
 from collections import defaultdict
 
 

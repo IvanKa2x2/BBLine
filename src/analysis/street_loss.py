@@ -1,5 +1,5 @@
 # analysis/street_loss.py потери по улицам
-from utils import fetchall
+from analysis.utils import fetchall
 
 
 def main():

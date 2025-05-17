@@ -1,5 +1,5 @@
 # analysis/summary.py единый отчет по Hero (винрейт, позиции, действия, динамика)
-from utils import fetchall, print_table
+from analysis.utils import fetchall, print_table
 
 
 def summary():

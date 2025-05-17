@@ -1,5 +1,5 @@
 # analysis/strong_hands.py только сильные руки
-from utils import fetchall, normalize, print_table
+from analysis.utils import fetchall, normalize, print_table
 from collections import defaultdict
 
 TRACKED = {

@@ -1,0 +1,6 @@
+typer>=0.9
+
+[dev]
+pytest
+ruff
+black
