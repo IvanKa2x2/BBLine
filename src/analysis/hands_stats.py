@@ -1,9 +1,11 @@
 # analysis/hands_stats.py анализ по рукам (AJo, TT, AKs...)
-from analysis.utils import fetchall, normalize, print_table
+from analysis.utils import fetchall, normalize, print_table, validate_table
 from collections import defaultdict
 
 
 def main():
+    validate_table("hero_cards")
+    validate_table("players")
     rows = fetchall(
         """
         SELECT hc.card1, hc.card2, hc.suited, p.won_bb

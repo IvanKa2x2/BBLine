@@ -23,7 +23,8 @@ def create_database(db_path="db/bbline.sqlite"):
         hero_pos TEXT,
         pot_rake REAL,
         pot_total REAL,
-        winner_seat INTEGER
+        winner_seat INTEGER,
+        showdown INTEGER DEFAULT 0
     )
     """
     )
@@ -56,6 +57,7 @@ def create_database(db_path="db/bbline.sqlite"):
         hand_id TEXT,
         street TEXT CHECK(street IN ('P','F','T','R')),
         seat INTEGER,
+        player_id TEXT,
         action TEXT CHECK(action IN ('fold','call','raise','check','bet','all-in','post')),
         amount_bb REAL,
         FOREIGN KEY (hand_id) REFERENCES hands(hand_id)

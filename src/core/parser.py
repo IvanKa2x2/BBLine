@@ -2,27 +2,26 @@
 """
 Парсер HH **только для GGPoker**. Другие румы не поддерживаются.
 """
-
 import re
 import sqlite3
-from datetime import datetime
 import sys
 import os
 import glob
 import logging
+from datetime import datetime
+
+# Добавляем путь до utils
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from db.db_schema import create_database
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler("parser_errors.log", encoding="utf-8"),
-        logging.StreamHandler()  # чтобы видеть print/log в терминале
-    ]
+        logging.StreamHandler(),  # чтобы видеть print/log в терминале
+    ],
 )
-
-# Добавляем путь до utils
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from db.db_schema import create_database
 
 DB_PATH = "db/bbline.sqlite"
 
@@ -49,6 +48,13 @@ def parse_gg_file(filepath):
     return hands
 
 
+def has_showdown(hand_lines):
+    """
+    Корректно определяет шоудаун: если кто-то реально показал карты.
+    """
+    return any(("shows [" in line or "showed [" in line) for line in hand_lines)
+
+
 def get_pos(seat, btn_seat, seats_list):
     n = len(seats_list)
     pos_map = {
@@ -59,7 +65,7 @@ def get_pos(seat, btn_seat, seats_list):
         2: ["BTN", "BB"],
     }
     if n not in pos_map or btn_seat not in seats_list:
-        return "?"   # вот это ключ! Не падаем, а просто ставим неизвестную позицию
+        return "?"  # вот это ключ! Не падаем, а просто ставим неизвестную позицию
     sorted_seats = sorted(seats_list)
     btn_idx = sorted_seats.index(btn_seat)
     order = [sorted_seats[(btn_idx + i) % n] for i in range(n)]
@@ -201,9 +207,7 @@ def parse_actions(hand_lines, bb, strict_dedup=True):
                 current_street = street
                 break
 
-        m = re.match(
-            r"(.+?): (bets|calls|raises|checks|folds)( to)? ?\$?([\d\.]+)?", line
-        )
+        m = re.match(r"(.+?): (bets|calls|raises|checks|folds)( to)? ?\$?([\d\.]+)?", line)
         if not (m and current_street):
             continue
 
@@ -280,14 +284,10 @@ def parse_and_insert_hands(filepath):
             # Общие данные
             hand_id_match = re.search(r"#(HD\d+):", joined)
             table_name_match = re.search(r"Table '(.+?)'", joined)
-            timestamp_match = re.search(
-                r"(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})", joined
-            )
+            timestamp_match = re.search(r"(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})", joined)
             stakes_match = re.search(r"\(\$(\d+\.\d+)/\$(\d+\.\d+)\)", joined)
 
-            if not (
-                hand_id_match and table_name_match and timestamp_match and stakes_match
-            ):
+            if not (hand_id_match and table_name_match and timestamp_match and stakes_match):
                 raise ValueError("Не удалось найти необходимые поля")
 
             hand_id = hand_id_match.group(1)
@@ -311,9 +311,10 @@ def parse_and_insert_hands(filepath):
             )
 
             # Парсим метаданные раздачи
-            btn_seat, hero_seat, hero_pos, pot_total, pot_rake, winner_seat = (
-                parse_hand_meta(hand)
-            )
+            btn_seat, hero_seat, hero_pos, pot_total, pot_rake, winner_seat = parse_hand_meta(hand)
+
+            showdown = 1 if has_showdown(hand) else 0
+            c.execute("UPDATE hands SET showdown = ? WHERE hand_id = ?", (showdown, hand_id))
 
             # Обновляем hands этими полями
             c.execute(
@@ -379,11 +380,19 @@ def parse_and_insert_hands(filepath):
                     continue
                 c.execute(
                     """
-                    INSERT INTO actions (hand_id, street, seat, action, amount_bb)
-                    VALUES (?, ?, ?, ?, ?)
-                """,
-                    (hand_id, act["street"], seat, act["action"], act["amount_bb"]),
+                    INSERT INTO actions (hand_id, street, seat, player_id, action, amount_bb)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        hand_id,
+                        act["street"],
+                        seat,
+                        act["player_id"],
+                        act["action"],
+                        act["amount_bb"],
+                    ),
                 )
+
                 # --- вставляем board в таблицу ---
             flop1, flop2, flop3, turn_card, river_card = parse_board(hand)
             c.execute(
@@ -407,9 +416,7 @@ def parse_and_insert_hands(filepath):
                     (end_stack, won_bb, hand_id, seat),
                 )
             # Находим Hero seat
-            hero_seat = next(
-                (p["seat"] for p in players if "Hero" in p["player_id"]), None
-            )
+            hero_seat = next((p["seat"] for p in players if "Hero" in p["player_id"]), None)
             hero_player = next((p for p in players if "Hero" in p["player_id"]), None)
 
             if hero_seat is not None and hero_player is not None:
@@ -418,7 +425,8 @@ def parse_and_insert_hands(filepath):
                 invested_bb = sum(
                     a["amount_bb"]
                     for a in parsed_actions
-                    if seat_map.get(a["player_id"]) == hero_seat and a["action"] in ("call", "bet", "raise")
+                    if seat_map.get(a["player_id"]) == hero_seat
+                    and a["action"] in ("call", "bet", "raise")
                 )
                 first_action = next(
                     (
@@ -452,7 +460,6 @@ def parse_and_insert_hands(filepath):
                     ),
                 )
 
-
         except Exception as e:
             logging.warning(f"Ошибка в раздаче: {hand[:2]} — {e}")
             print(f"❌ Ошибка в раздаче: {hand[:2]} — {e}")
@@ -471,8 +478,8 @@ def find_and_parse_all_txt_files(folder="data/raw"):
         print(f"🧾 Обрабатываем: {path}")
         try:
             parse_and_insert_hands(path)
-            os.remove(path)
-            print(f"🗑️ Удалён: {path}")
+            # os.remove(path)
+            # print(f"🗑️ Удалён: {path}")
         except Exception as e:
             print(f"❌ Ошибка при обработке {path}: {e}")
 

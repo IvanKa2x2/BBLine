@@ -1,5 +1,5 @@
 # analysis/strong_hands.py только сильные руки
-from analysis.utils import fetchall, normalize, print_table
+from analysis.utils import fetchall, normalize, print_table, validate_table
 from collections import defaultdict
 
 TRACKED = {
@@ -19,6 +19,8 @@ TRACKED = {
 
 
 def main():
+    validate_table("hero_cards")
+    validate_table("players")
     rows = fetchall(
         """
         SELECT hc.hand_id, hc.card1, hc.card2, hc.suited, p.won_bb
