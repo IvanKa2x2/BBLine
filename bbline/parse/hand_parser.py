@@ -153,7 +153,27 @@ def parse_actions(
     return actions, order_no
 
 
+# --- подсчет вложений ---
+def calc_hero_invested(actions, hero_seat):
+    """
+    Считаем, сколько Hero вложил в раздачу.
+    """
+    invested = 0.0
+    for act in actions:
+        if act["seat_no"] == hero_seat and act["act"] in {
+            "BET",
+            "CALL",
+            "RAISE",
+            "POST_SMALL_BLIND",
+            "POST_BIG_BLIND",
+        }:
+            if act["amount"] is not None:
+                invested += act["amount"]
+    return invested
+
+
 def parse_hand(raw: str) -> Dict[str, Any]:
+    hero_uncalled = 0.0
     lines = [ln.rstrip() for ln in raw.splitlines() if ln.strip()]
     m = RE_HAND_START.match(lines[0])
     if not m:
@@ -208,6 +228,9 @@ def parse_hand(raw: str) -> Dict[str, Any]:
                 if m_board.group("turnriver"):
                     board_cards[street_state].append(m_board.group("turnriver"))
                 continue
+        m_uncalled = RE_UNCALLED.match(ln)
+        if m_uncalled and m_uncalled.group("player").strip() == "Hero":
+            hero_uncalled += float(m_uncalled.group("amt"))
 
         # --- главный фикс шоудаунов ---
         m_sd = RE_SHOWDOWN.search(ln)
@@ -255,7 +278,8 @@ def parse_hand(raw: str) -> Dict[str, Any]:
     turn = "".join(board_cards["TURN"][-1:]) if board_cards["TURN"] else ""
     river = "".join(board_cards["RIVER"][-1:]) if board_cards["RIVER"] else ""
     board_str = "|".join(filter(None, [flop, turn, river]))
-
+    hero_invested = calc_hero_invested(actions, hero_seat)
+    hero_invested -= hero_uncalled
     hand_dict: Dict[str, Any] = {
         "hand_id": hand_id,
         "site": "ggpoker",
@@ -267,6 +291,7 @@ def parse_hand(raw: str) -> Dict[str, Any]:
         "hero_name": "Hero",
         "hero_cards": hero_cards,
         "board": board_str,
+        "hero_invested": hero_invested,
         "rake": rake,
         "jackpot": jackpot,
         "final_pot": total_pot,

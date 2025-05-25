@@ -32,11 +32,14 @@ CREATE TABLE IF NOT EXISTS hands (
     hero_name     TEXT    NOT NULL,        -- “Hero”
     hero_cards    TEXT,                    -- ‘5s9s’
     board         TEXT,                    -- ‘6hQc8h|8c|3d’
+    hero_invested REAL,
+    hero_rake     REAL,
     rake          REAL    DEFAULT 0,
     jackpot       REAL    DEFAULT 0,
     preflop_pot   REAL,                    -- pot size до флопа
     final_pot     REAL,                    -- pot size в summary
     hero_net      REAL,                    -- $ выиграл/проиграл
+    net_bb        REAL, 
     hero_ev_diff  REAL,                    -- all-in EV – net (если есть)
     hero_won      INTEGER,                 -- 1/0 выиграл ли шоудаун
     hero_showdown INTEGER,                 -- 1/0 WTSD

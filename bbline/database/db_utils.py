@@ -13,9 +13,10 @@ def insert_hand(hand):
         INSERT OR IGNORE INTO hands (
             hand_id, site, game_type, limit_bb, datetime_utc,
             button_seat, hero_seat, hero_name, hero_cards,
-            board, rake, jackpot, final_pot, hero_net, hero_showdown
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """,
+            board, hero_invested, rake, jackpot, final_pot,
+            hero_net, hero_showdown
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
         (
             hand["hand_id"],
             hand["site"],
@@ -27,10 +28,11 @@ def insert_hand(hand):
             hand["hero_name"],
             hand["hero_cards"],
             hand["board"],
+            hand["hero_invested"],  # ← добавили
             hand["rake"],
             hand["jackpot"],
             hand["final_pot"],
-            hand.get("hero_net", 0),
+            hand.get("hero_net"),
             hand.get("hero_showdown", 0),
         ),
     )
