@@ -1,5 +1,0 @@
-analysis
-core
-db
-export
-reports
