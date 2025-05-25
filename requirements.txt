@@ -2,3 +2,5 @@ pandas
 duckdb
 sqlalchemy
 typer>=0.9.0
+rich
+sqlite-utils
