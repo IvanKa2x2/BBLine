@@ -1,3 +1,5 @@
+# db_utils.py
+
 import sqlite3
 from pathlib import Path
 
@@ -10,7 +12,7 @@ def insert_hand(hand):
     # 1. hands
     cur.execute(
         """
-        INSERT OR IGNORE INTO hands (
+        INSERT OR REPLACE INTO hands (
             hand_id, site, game_type, limit_bb, datetime_utc,
             button_seat, hero_seat, hero_name, hero_cards,
             board, hero_invested, rake, jackpot, final_pot,

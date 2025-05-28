@@ -53,6 +53,8 @@ RE_SUMMARY_SHOW = re.compile(
 RE_UNCALLED = re.compile(r"Uncalled bet \(\$(?P<amt>\d+\.\d+)\) returned to (?P<player>.+)")
 RE_COLLECTED = re.compile(r"^(?P<player>.+?) collected \$?(?P<amt>\d+\.\d+) from pot")
 RE_WON = re.compile(r"^(?P<player>.+?) won \(\$(?P<amt>\d+\.\d+)\)")
+RE_SEAT_WON = re.compile(r"^Seat\s+\d+:\s+(?P<player>.+?)\s+won\s+\(\$(?P<amt>\d+\.\d+)\)")
+RE_SHOWS_COLLECTED = re.compile(r"^Hero: shows .*? collected \$?(?P<amt>\d+\.\d+)")
 RE_TOTAL_POT = re.compile(
     r"Total pot \$?(?P<total>\d+\.\d+) \| Rake \$?(?P<rake>\d+\.\d+).*?(?:Jackpot \$?(?P<jackpot>\d+\.\d+))?"
 )
@@ -67,7 +69,6 @@ def normalize_player_name(name):
 
 
 def split_raw_hands(text: str) -> List[str]:
-    """Разбиваем файл .txt на отдельные руки."""
     out, buf = [], []
     for line in text.splitlines():
         if line.startswith("Poker Hand #") and buf:
@@ -83,10 +84,6 @@ def split_raw_hands(text: str) -> List[str]:
 def parse_seat_block(
     lines: List[str],
 ) -> Tuple[Dict[str, int], List[Dict[str, Any]], Dict[int, str]]:
-    """
-    Возвращает:
-      seat_map_name_to_num, seats, seat_map_num_to_name
-    """
     seat_map_name_to_num, seats, seat_map_num_to_name = {}, [], {}
     for ln in lines:
         m = RE_SEAT.match(ln)
@@ -103,10 +100,6 @@ def parse_seat_block(
 def utc_iso(date_str: str, time_str: str) -> str:
     dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M:%S")
     return dt.replace(tzinfo=timezone.utc).isoformat(timespec="seconds")
-
-
-def street_from_state(state: str) -> str:
-    return {"PREFLOP": "PREFLOP", "FLOP": "FLOP", "TURN": "TURN", "RIVER": "RIVER"}[state]
 
 
 def parse_actions(
@@ -153,27 +146,31 @@ def parse_actions(
     return actions, order_no
 
 
-# --- подсчет вложений ---
 def calc_hero_invested(actions, hero_seat):
     """
-    Считаем, сколько Hero вложил в раздачу.
+    Считаем вложения героя «как в Hand2Note»:
+    - слепые блайнды (+пост анте, если будут) входят в расход
+      **только когда позже был добровольный экшен**.
     """
     invested = 0.0
+    voluntary = False
     for act in actions:
-        if act["seat_no"] == hero_seat and act["act"] in {
-            "BET",
-            "CALL",
-            "RAISE",
-            "POST_SMALL_BLIND",
-            "POST_BIG_BLIND",
-        }:
-            if act["amount"] is not None:
-                invested += act["amount"]
-    return invested
+        if act["seat_no"] != hero_seat:
+            continue
+
+        if act["act"] in {"BET", "CALL", "RAISE"}:
+            voluntary = True
+            invested += act["amount"] or 0.0
+
+        elif act["act"].startswith("POST_") and voluntary:
+            invested += act["amount"] or 0.0
+
+    return round(invested, 2)
 
 
 def parse_hand(raw: str) -> Dict[str, Any]:
     hero_uncalled = 0.0
+    hero_net = None
     lines = [ln.rstrip() for ln in raw.splitlines() if ln.strip()]
     m = RE_HAND_START.match(lines[0])
     if not m:
@@ -186,11 +183,8 @@ def parse_hand(raw: str) -> Dict[str, Any]:
     button_seat = int(m_btn.group("button")) if m_btn else -1
 
     first_posts_idx = next((i for i, ln in enumerate(lines) if RE_POST_BLIND.match(ln)), len(lines))
-    seat_block = lines[2:first_posts_idx]  # после заголовка и строки Table
-
-    # Вот тут сразу собираем два мапа!
+    seat_block = lines[2:first_posts_idx]
     seat_map_name_to_num, seats, seat_map_num_to_name = parse_seat_block(seat_block)
-
     hero_seat = next(
         (s["seat_no"] for s in seats if normalize_player_name(s["player_id"]) == "Hero"), -1
     )
@@ -228,19 +222,18 @@ def parse_hand(raw: str) -> Dict[str, Any]:
                 if m_board.group("turnriver"):
                     board_cards[street_state].append(m_board.group("turnriver"))
                 continue
+
         m_uncalled = RE_UNCALLED.match(ln)
         if m_uncalled and m_uncalled.group("player").strip() == "Hero":
             hero_uncalled += float(m_uncalled.group("amt"))
 
-        # --- главный фикс шоудаунов ---
+        # --- ловим шоудаун ---
         m_sd = RE_SHOWDOWN.search(ln)
         if m_sd:
             player = normalize_player_name(m_sd.group("player"))
             cards = m_sd.group("card1") + m_sd.group("card2")
-            # Получаем seat по нику
             seat = seat_map_name_to_num.get(player, -1)
             if seat == -1 and m_sd.group("seat"):
-                # fallback: если seat был в строке Seat 5: ... showed ...
                 seat = int(m_sd.group("seat"))
             if seat == -1:
                 print(
@@ -251,13 +244,26 @@ def parse_hand(raw: str) -> Dict[str, Any]:
                 {
                     "seat_no": seat,
                     "cards": cards,
-                    "won": None,  # сумму выигрыша можно добрать позже
+                    "won": None,
                 }
             )
 
-        m_coll = RE_COLLECTED.match(ln) or RE_WON.match(ln)
+        # --- Фикс: hero_net ищем по всем вариантам записи ---
+        # --- Фикс: hero_net ищем по всем вариантам записи ---
+        m_coll = RE_COLLECTED.match(ln)
+        m_won = RE_WON.match(ln)
+        m_sc = RE_SHOWS_COLLECTED.match(ln)
+        m_sw = RE_SEAT_WON.match(ln)
+
         if m_coll and normalize_player_name(m_coll.group("player")) == "Hero":
             hero_net = float(m_coll.group("amt"))
+        elif m_won and normalize_player_name(m_won.group("player")) == "Hero":
+            hero_net = float(m_won.group("amt"))
+        elif m_sc:
+            hero_net = float(m_sc.group("amt"))
+        elif m_sw:
+            hero_net = float(m_sw.group("amt"))
+
         street_lines.append(ln)
 
     if street_lines:
@@ -295,7 +301,7 @@ def parse_hand(raw: str) -> Dict[str, Any]:
         "rake": rake,
         "jackpot": jackpot,
         "final_pot": total_pot,
-        "hero_net": locals().get("hero_net", None),
+        "hero_net": hero_net,
         "hero_showdown": int(any(s["seat_no"] == hero_seat for s in showdowns)),
         "seats": seats,
         "actions": actions,
@@ -311,7 +317,6 @@ def parse_file(path: str) -> List[Dict[str, Any]]:
     return [parse_hand(h) for h in hands_raw]
 
 
-# CLI quick-test
 if __name__ == "__main__":
     import json
     import sys

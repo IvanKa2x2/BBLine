@@ -26,7 +26,7 @@ def batch_import(folder, ext=".txt"):
     total, skipped, imported = 0, 0, 0
 
     for file in files:
-        print(f"\n===> Обрабатываем: {file.name}")
+        # print(f"\n===> Обрабатываем: {file.name}")
         try:
             hands = parse_file(str(file))
         except Exception as e:
@@ -45,10 +45,6 @@ def batch_import(folder, ext=".txt"):
                     skipped += 1
             except Exception as e:
                 print(f"[ERR] Не удалось вставить {hand.get('hand_id')} — {e}")
-
-        print(
-            f"[OK] {file.name}: {len(hands)} рук обработано ({imported} новых, {skipped} уже были)"
-        )
 
     print("\n=== Batch импорт завершён ===")
     print(
