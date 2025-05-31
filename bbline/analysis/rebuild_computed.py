@@ -1,6 +1,6 @@
 # bbline/analysis/rebuild_computed.py
 """
-Пересчитывает флаги в computed_stats для КАЖДОЙ руки + обновляет hero_invested, hero_rake, net_bb.
+Пересчитывает computed_stats + hero_rake, net_bb в 'hands'.
 Запуск:
     python -m bbline.analysis.rebuild_computed
 """
@@ -10,135 +10,140 @@ from pathlib import Path
 from collections import defaultdict
 
 DB = Path(__file__).resolve().parents[1] / "database" / "bbline.sqlite"
+
 VPIP = {"CALL", "BET", "RAISE"}
 RAISE = {"RAISE"}
 
 
-def rebuild():
-    cx = sqlite3.connect(DB)
-    cx.row_factory = sqlite3.Row
-    cur = cx.cursor()
-    cur.execute("PRAGMA foreign_keys = ON;")
+def rebuild() -> None:
+    with sqlite3.connect(DB) as cx:
+        cx.row_factory = sqlite3.Row
+        cur = cx.cursor()
+        cur.execute("PRAGMA foreign_keys = ON;")
 
-    cur.execute("DELETE FROM computed_stats;")
+        # чистим computed_stats
+        cur.execute("DELETE FROM computed_stats;")
 
-    # Берём все руки
-    hands = cur.execute(
+        # забираем всё нужное одним запросом
+        hands = cur.execute(
+            """
+            SELECT  hand_id, hero_seat, hero_net, hero_showdown,
+                    hero_invested, rake, final_pot, limit_bb
+            FROM    hands;
         """
-        SELECT hand_id, hero_seat, hero_net, hero_showdown, hero_invested, rake, final_pot
-        FROM   hands
-    """
-    ).fetchall()
-
-    for h in hands:
-        hand_id = h["hand_id"]
-        hero_seat = h["hero_seat"]
-        hero_net = h["hero_net"]
-        hero_showdown = h["hero_showdown"]
-        hero_in = h["hero_invested"] or 0
-        rake_tot = h["rake"] or 0
-        final_pot = h["final_pot"] or 0
-
-        # bb для этой руки (1 строка)
-        bb_row = cur.execute("SELECT limit_bb FROM hands WHERE hand_id = ?", (hand_id,)).fetchone()
-        bb = bb_row[0] if bb_row and bb_row[0] else 0.02  # fallback на 0.02
-
-        # Доля рейка героя (safe)
-        hero_rake = rake_tot * (hero_in / final_pot) if final_pot else 0
-
-        # ---- КОРРЕКТНАЯ прибыль ----
-        profit = (hero_net if hero_net is not None else 0) - hero_in
-        net_bb = profit / bb if bb else 0
-
-        # Сразу обновим hands!
-        cur.execute(
-            """
-            UPDATE hands
-               SET hero_rake = ?,
-                   net_bb    = ?
-             WHERE hand_id   = ?;
-            """,
-            (hero_rake, net_bb, hand_id),
-        )
-
-        # дефолтные флаги
-        st = defaultdict(int)
-        st["wtsd"] = int(bool(hero_showdown))
-        st["wsd"] = int(hero_showdown and (hero_net or 0) > 0)
-        st["wwsf"] = int(((hero_net or 0) > 0) and not hero_showdown)
-
-        # действия только этой руки
-        acts = cur.execute(
-            """
-            SELECT street, seat_no, act
-            FROM   actions
-            WHERE  hand_id = ?
-            ORDER  BY order_no
-        """,
-            (hand_id,),
         ).fetchall()
 
-        preflop_raises = 0
-        hero_raised_pf = False
-        hero_faced_3b = False
-        flop_bet_seen = False
+        for h in hands:
+            hand_id = h["hand_id"]
+            hero_seat = h["hero_seat"]
+            hero_net = h["hero_net"] or 0.0
+            hero_in = h["hero_invested"] or 0.0
+            hero_sd = bool(h["hero_showdown"])
+            rake_total = h["rake"] or 0.0
+            final_pot = h["final_pot"] or 0.0  # уже после рейка
+            bb = h["limit_bb"] or 0.02  # страхуемся
 
-        for a in acts:
-            street, seat, act = a["street"], a["seat_no"], a["act"]
+            # --- корректная доля рейка героя ---
+            rakeable_pot = final_pot + rake_total  # до вычета
+            hero_rake = round(rake_total * (hero_in / rakeable_pot) if rakeable_pot else 0.0, 2)
 
-            # PREFLOP ---------------------------------
-            if street == "PREFLOP":
-                if act in VPIP and seat == hero_seat:
-                    st["vpip"] = 1
-                if act in RAISE:
-                    preflop_raises += 1
+            # --- чистый профит и winrate ---
+            profit = hero_net or 0.0  # hero_net уже «чистый»
+            net_bb = round(profit / bb, 4)  # bb > 0 гарантирован
+            # обновляем руки
+            cur.execute(
+                """
+                UPDATE hands
+                   SET hero_rake = ?,
+                       net_bb    = ?
+                 WHERE hand_id   = ?;
+            """,
+                (hero_rake, net_bb, hand_id),
+            )
 
-                    if seat == hero_seat:
-                        st["pfr"] = 1  # ← флаг ставится ВСЕГДА, раз герой рейзит
-                        if preflop_raises == 1:  # впервые в раздаче → open/iso-raise
-                            hero_raised_pf = True
-                        elif preflop_raises == 2:  # вторая волна рейзов → 3-бет
-                            st["threebet"] = 1
-                    else:
-                        if hero_raised_pf:
-                            hero_faced_3b = True
-                if act == "FOLD" and seat == hero_seat and hero_faced_3b:
-                    st["fold_to_3b"] = 1
+            # ---------------- computed_stats -------------
+            st = defaultdict(int)
 
-            # FLOP ------------------------------------
-            if street == "FLOP":
-                if act == "BET" and not flop_bet_seen:
-                    flop_bet_seen = True
-                    if hero_raised_pf and seat == hero_seat:
-                        st["cbet_flop"] = 1
-                if act == "FOLD" and seat == hero_seat and flop_bet_seen:
-                    st["fold_to_cbet"] = 1
+            # исходы
+            st["wtsd"] = int(hero_sd)
+            st["wsd"] = int(hero_sd and profit > 0)
+            st["wwsf"] = int((profit > 0) and not hero_sd)
 
-        cur.execute(
-            """
-          INSERT OR REPLACE INTO computed_stats (
-              hand_id, vpip, pfr, threebet,
-              fold_to_3b, cbet_flop, fold_to_cbet,
-              wwsf, wt_sd, w_sd
-          ) VALUES (?,?,?,?,?,?,?,?,?,?)
-        """,
-            (
-                hand_id,
-                st["vpip"],
-                st["pfr"],
-                st["threebet"],
-                st["fold_to_3b"],
-                st["cbet_flop"],
-                st["fold_to_cbet"],
-                st["wwsf"],
-                st["wtsd"],
-                st["wsd"],
-            ),
-        )
+            # действия по руке
+            acts = cur.execute(
+                """
+                SELECT street, seat_no, act
+                FROM   actions
+                WHERE  hand_id = ?
+                ORDER  BY order_no;
+            """,
+                (hand_id,),
+            ).fetchall()
 
-    cx.commit()
-    cx.close()
-    print("✅ computed_stats и winrate обновлены для {} рук".format(len(hands)))
+            preflop_raises = 0
+            hero_raised_pf = False
+            hero_faced_3bet = False
+            flop_bet_seen = False
+
+            for a in acts:
+                street, seat, act = a["street"], a["seat_no"], a["act"]
+
+                # ---------- PREFLOP ----------
+                if street == "PREFLOP":
+                    if act in VPIP and seat == hero_seat:
+                        st["vpip"] = 1
+
+                    if act in RAISE:
+                        preflop_raises += 1
+
+                        if seat == hero_seat:  #   действия героя
+                            st["pfr"] = 1
+                            if preflop_raises == 1:
+                                hero_raised_pf = True
+                            elif preflop_raises == 2:
+                                st["threebet"] = 1
+                        else:  #   действия оппа
+                            if hero_raised_pf:
+                                hero_faced_3bet = True
+
+                    if act == "FOLD" and seat == hero_seat and hero_faced_3bet:
+                        st["fold_to_3b"] = 1
+
+                # ---------- FLOP ----------
+                if street == "FLOP":
+                    if act == "BET" and not flop_bet_seen:
+                        flop_bet_seen = True
+                        if hero_raised_pf and seat == hero_seat:
+                            st["cbet_flop"] = 1
+                    if act == "FOLD" and seat == hero_seat and flop_bet_seen:
+                        st["fold_to_cbet"] = 1
+
+            # пишем в таблицу
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO computed_stats (
+                    hand_id, vpip, pfr, threebet,
+                    fold_to_3b, cbet_flop, fold_to_cbet,
+                    wwsf, wt_sd, w_sd
+                ) VALUES (?,?,?,?,?,?,?,?,?,?);
+            """,
+                (
+                    hand_id,
+                    st["vpip"],
+                    st["pfr"],
+                    st["threebet"],
+                    st["fold_to_3b"],
+                    st["cbet_flop"],
+                    st["fold_to_cbet"],
+                    st["wwsf"],
+                    st["wtsd"],
+                    st["wsd"],
+                ),
+            )
+
+        cx.commit()
+
+    print(f"✅  пересчитали computed_stats + winrate для {len(hands)} рук")
 
 
 if __name__ == "__main__":

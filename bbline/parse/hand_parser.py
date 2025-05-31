@@ -13,6 +13,8 @@ GGPoker HH → dict по схемам BBLine.
 import re
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple
+from collections import defaultdict
+
 
 # ---------- компилируем часто используемые regex’ы ----------
 RE_HAND_START = re.compile(
@@ -63,8 +65,8 @@ RE_TOTAL_POT = re.compile(
 # ------------------------------------------------------------
 def normalize_player_name(name):
     name = name.strip()
-    name = re.sub(r"\s*\(.*\)$", "", name)  # Убрать скобки и всё внутри
-    name = name.replace(":", "")  # Убрать двоеточие, если есть
+    name = re.sub(r"\s*\(.*\)$", "", name)
+    name = name.rstrip(":")
     return name
 
 
@@ -107,27 +109,38 @@ def parse_actions(
 ) -> Tuple[List[Dict[str, Any]], int]:
     actions = []
     order_no = order_start
+    street_commit = defaultdict(float)
     for ln in action_lines:
         m = RE_ACTION.match(ln)
         if not m:
             continue
-        player = m.group("player").strip()
+        player = normalize_player_name(m.group("player"))
         act, amount = None, None
 
         if m.group("posts"):
             act = "POST_" + m.group("blind_type").upper() + "_BLIND"
             amount = float(m.group("post_amt"))
+            street_commit[player] += amount
+
         elif m.group("bets"):
             act = "BET"
             amount = float(m.group("bet_amt"))
+            street_commit[player] += amount
+
         elif m.group("raises"):
             act = "RAISE"
-            amount = float(m.group("raise_to"))  # финальный размер
+            raise_to = float(m.group("raise_to"))
+            amount = raise_to - street_commit[player]
+            street_commit[player] = raise_to
+
         elif m.group("calls"):
             act = "CALL"
             amount = float(m.group("call_amt"))
+            street_commit[player] += amount
+
         elif m.group("folds"):
             act = "FOLD"
+
         elif m.group("checks"):
             act = "CHECK"
 
@@ -139,39 +152,50 @@ def parse_actions(
                     "seat_no": seat_map.get(player, -1),
                     "act": act,
                     "amount": amount,
-                    "allin": 0,  # GGPoker HH в тексте all-in помечает отдельным словом, добавим позже
+                    "allin": 0,  # суффикс не используешь пока
                 }
             )
             order_no += 1
     return actions, order_no
 
 
-def calc_hero_invested(actions, hero_seat):
+def calculate_invested(actions: list[dict], hero_seat: int) -> float:
     """
-    Считаем вложения героя «как в Hand2Note»:
-    - слепые блайнды (+пост анте, если будут) входят в расход
-      **только когда позже был добровольный экшен**.
+    Сколько реально ушло из-стека героя (H2N-логика):
+
+    • POST_SB / POST_BB копятся в buffer
+    • Как только встретили CALL / BET / RAISE —
+      считаем ход добровольным → добавляем buffer + сам amount
+    • Если добровольного действия так и не было, блайнды сгорают → invest = 0
     """
+    posted_blinds = 0.0
     invested = 0.0
     voluntary = False
-    for act in actions:
-        if act["seat_no"] != hero_seat:
+
+    for a in actions:
+        if a["seat_no"] != hero_seat:
             continue
-
-        if act["act"] in {"BET", "CALL", "RAISE"}:
+        if a["act"].startswith("POST_"):
+            posted_blinds += a["amount"] or 0.0
+        elif a["act"] in {"CALL", "BET", "RAISE"}:
             voluntary = True
-            invested += act["amount"] or 0.0
+            invested += a["amount"] or 0.0
 
-        elif act["act"].startswith("POST_") and voluntary:
-            invested += act["amount"] or 0.0
+    if voluntary:
+        invested += posted_blinds  # прибавляем посты только если был экшен
 
     return round(invested, 2)
 
 
-def parse_hand(raw: str) -> Dict[str, Any]:
+def parse_hand(raw: str) -> dict:
+    """
+    Парсит одну HH в dict. hero_net = win-loss, как в H2N.
+    """
     hero_uncalled = 0.0
-    hero_net = None
+    hero_collected = 0.0  # ← собираем сумму забранную героем, потом вычтем затраты
+    collected_set = set()
     lines = [ln.rstrip() for ln in raw.splitlines() if ln.strip()]
+
     m = RE_HAND_START.match(lines[0])
     if not m:
         raise ValueError("Bad HH header")
@@ -185,9 +209,17 @@ def parse_hand(raw: str) -> Dict[str, Any]:
     first_posts_idx = next((i for i, ln in enumerate(lines) if RE_POST_BLIND.match(ln)), len(lines))
     seat_block = lines[2:first_posts_idx]
     seat_map_name_to_num, seats, seat_map_num_to_name = parse_seat_block(seat_block)
-    hero_seat = next(
-        (s["seat_no"] for s in seats if normalize_player_name(s["player_id"]) == "Hero"), -1
-    )
+
+    # -- ищем Hero --
+    hero_player_key = None
+    hero_seat = -1
+    for s in seats:
+        if "Hero" in normalize_player_name(s["player_id"]):
+            hero_player_key = normalize_player_name(s["player_id"])
+            hero_seat = s["seat_no"]
+            break
+    if not hero_player_key:
+        hero_player_key = "Hero"
 
     hero_cards = None
     for ln in lines:
@@ -201,7 +233,6 @@ def parse_hand(raw: str) -> Dict[str, Any]:
     street_state, order_no = "PREFLOP", 0
     street_lines: List[str] = []
 
-    # --------- SHOWDOWN universal regex ---------
     RE_SHOWDOWN = re.compile(
         r"(?:Seat\s+(?P<seat>\d+):\s+)?(?P<player>\S+).*?show(?:ed|s)\s+\[(?P<card1>\w{2})\s+(?P<card2>\w{2})\]"
     )
@@ -224,10 +255,10 @@ def parse_hand(raw: str) -> Dict[str, Any]:
                 continue
 
         m_uncalled = RE_UNCALLED.match(ln)
-        if m_uncalled and m_uncalled.group("player").strip() == "Hero":
+        if m_uncalled and normalize_player_name(m_uncalled.group("player")) == hero_player_key:
             hero_uncalled += float(m_uncalled.group("amt"))
 
-        # --- ловим шоудаун ---
+        # --- шоудаун ---
         m_sd = RE_SHOWDOWN.search(ln)
         if m_sd:
             player = normalize_player_name(m_sd.group("player"))
@@ -240,29 +271,28 @@ def parse_hand(raw: str) -> Dict[str, Any]:
                     f"[WARN] Не найден seat_no для игрока '{player}' в руке {hand_id}, seat_map: {seat_map_name_to_num}"
                 )
                 continue
-            showdowns.append(
-                {
-                    "seat_no": seat,
-                    "cards": cards,
-                    "won": None,
-                }
-            )
+            if not any(s["seat_no"] == seat for s in showdowns):
+                showdowns.append({"seat_no": seat, "cards": cards, "won": None})
 
-        # --- Фикс: hero_net ищем по всем вариантам записи ---
-        # --- Фикс: hero_net ищем по всем вариантам записи ---
+        # --- hero_collected --- (а не hero_net!)
         m_coll = RE_COLLECTED.match(ln)
         m_won = RE_WON.match(ln)
         m_sc = RE_SHOWS_COLLECTED.match(ln)
         m_sw = RE_SEAT_WON.match(ln)
 
-        if m_coll and normalize_player_name(m_coll.group("player")) == "Hero":
-            hero_net = float(m_coll.group("amt"))
-        elif m_won and normalize_player_name(m_won.group("player")) == "Hero":
-            hero_net = float(m_won.group("amt"))
+        amt = None
+        if m_coll and normalize_player_name(m_coll.group("player")) == hero_player_key:
+            amt = float(m_coll.group("amt"))
+        elif m_won and normalize_player_name(m_won.group("player")) == hero_player_key:
+            amt = float(m_won.group("amt"))
         elif m_sc:
-            hero_net = float(m_sc.group("amt"))
-        elif m_sw:
-            hero_net = float(m_sw.group("amt"))
+            amt = float(m_sc.group("amt"))
+        elif m_sw and normalize_player_name(m_sw.group("player")) == hero_player_key:
+            amt = float(m_sw.group("amt"))
+
+        if amt is not None and amt not in collected_set:
+            hero_collected += amt
+            collected_set.add(amt)
 
         street_lines.append(ln)
 
@@ -280,13 +310,16 @@ def parse_hand(raw: str) -> Dict[str, Any]:
                 jackpot = float(m.group("jackpot"))
             break
 
-    flop = "".join(board_cards["FLOP"]) if board_cards["FLOP"] else ""
-    turn = "".join(board_cards["TURN"][-1:]) if board_cards["TURN"] else ""
-    river = "".join(board_cards["RIVER"][-1:]) if board_cards["RIVER"] else ""
+    flop = "".join(board_cards["FLOP"])
+    turn = "".join(board_cards["TURN"][-1:])
+    river = "".join(board_cards["RIVER"][-1:])
     board_str = "|".join(filter(None, [flop, turn, river]))
-    hero_invested = calc_hero_invested(actions, hero_seat)
-    hero_invested -= hero_uncalled
-    hand_dict: Dict[str, Any] = {
+
+    hero_invested = calculate_invested(actions, hero_seat) - hero_uncalled
+
+    profit = round(hero_collected - hero_invested, 2)  # ← вот тут чистый win/loss!
+
+    hand_dict = {
         "hand_id": hand_id,
         "site": "ggpoker",
         "game_type": "NLHE",
@@ -294,14 +327,14 @@ def parse_hand(raw: str) -> Dict[str, Any]:
         "datetime_utc": date_iso,
         "button_seat": button_seat,
         "hero_seat": hero_seat,
-        "hero_name": "Hero",
+        "hero_name": hero_player_key,
         "hero_cards": hero_cards,
         "board": board_str,
         "hero_invested": hero_invested,
         "rake": rake,
         "jackpot": jackpot,
         "final_pot": total_pot,
-        "hero_net": hero_net,
+        "hero_net": profit,  # <-- только это поле используется дальше для bb/100 и profit!
         "hero_showdown": int(any(s["seat_no"] == hero_seat for s in showdowns)),
         "seats": seats,
         "actions": actions,
@@ -325,7 +358,6 @@ if __name__ == "__main__":
         PATH = sys.argv[1]
     else:
         PATH = "bbline/assets/test_session.txt"
-
     for hh in parse_file(PATH):
         print(json.dumps(hh, indent=2))
         print("-" * 80)
