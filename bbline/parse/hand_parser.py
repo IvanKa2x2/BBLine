@@ -5,16 +5,14 @@ GGPoker HH → dict по схемам BBLine.
 ▪ покрывает NLHE 6-max / 9-max, Hero-only, без мульти-бордов
 ▪ для скорости и простоты — чистые regex + state-machine
 
-⚠️  Это лишь каркас MVP:
-    • hero_net считается только по строкам «collected / won / lost» в SUMMARY
-    • EV-diff, Uncalled bet, All-in not tracked (сделаем позже в computed_pass#2)
+⚠️  MVP: hero_net считается по строкам «collected / won / lost» в SUMMARY
+    • EV-diff, Uncalled bet, All-in не трекаются (ещё не реализовано)
 """
 
 import re
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
-
 
 # ---------- компилируем часто используемые regex’ы ----------
 RE_HAND_START = re.compile(
@@ -24,7 +22,6 @@ RE_HAND_START = re.compile(
 )
 
 RE_TABLE_BUTTON = re.compile(r"Table '.*?' .*? Seat #(?P<button>\d+) is the button")
-
 RE_SEAT = re.compile(
     r"Seat (?P<seat>\d+): (?P<player>.+?) " r"\(\$(?P<stack>\d+(\.\d+)?) in chips\)"
 )
@@ -63,7 +60,8 @@ RE_TOTAL_POT = re.compile(
 
 
 # ------------------------------------------------------------
-def normalize_player_name(name):
+def normalize_player_name(name: str) -> str:
+    """Нормализует имя игрока: убирает пробелы, скобки и двоеточие."""
     name = name.strip()
     name = re.sub(r"\s*\(.*\)$", "", name)
     name = name.rstrip(":")
@@ -71,6 +69,7 @@ def normalize_player_name(name):
 
 
 def split_raw_hands(text: str) -> List[str]:
+    """Разделяет текст с историями раздач на отдельные раздачи."""
     out, buf = [], []
     for line in text.splitlines():
         if line.startswith("Poker Hand #") and buf:
@@ -86,7 +85,11 @@ def split_raw_hands(text: str) -> List[str]:
 def parse_seat_block(
     lines: List[str],
 ) -> Tuple[Dict[str, int], List[Dict[str, Any]], Dict[int, str]]:
-    seat_map_name_to_num, seats, seat_map_num_to_name = {}, [], {}
+    """Парсит блок информации об игроках за столом."""
+    seat_map_name_to_num: Dict[str, int] = {}
+    seats: List[Dict[str, Any]] = []
+    seat_map_num_to_name: Dict[int, str] = {}
+
     for ln in lines:
         m = RE_SEAT.match(ln)
         if m:
@@ -100,6 +103,7 @@ def parse_seat_block(
 
 
 def utc_iso(date_str: str, time_str: str) -> str:
+    """Преобразует дату и время из истории раздачи в формат ISO 8601 UTC."""
     dt = datetime.strptime(f"{date_str} {time_str}", "%Y/%m/%d %H:%M:%S")
     return dt.replace(tzinfo=timezone.utc).isoformat(timespec="seconds")
 
@@ -107,40 +111,38 @@ def utc_iso(date_str: str, time_str: str) -> str:
 def parse_actions(
     action_lines: List[str], seat_map: Dict[str, int], street: str, order_start: int
 ) -> Tuple[List[Dict[str, Any]], int]:
-    actions = []
+    """Парсит строки действий игроков на определенной улице."""
+    actions: List[Dict[str, Any]] = []
     order_no = order_start
     street_commit = defaultdict(float)
+
     for ln in action_lines:
         m = RE_ACTION.match(ln)
         if not m:
             continue
         player = normalize_player_name(m.group("player"))
-        act, amount = None, None
+        act: str | None = None
+        amount: float | None = None
 
         if m.group("posts"):
             act = "POST_" + m.group("blind_type").upper() + "_BLIND"
             amount = float(m.group("post_amt"))
             street_commit[player] += amount
-
         elif m.group("bets"):
             act = "BET"
             amount = float(m.group("bet_amt"))
             street_commit[player] += amount
-
         elif m.group("raises"):
             act = "RAISE"
             raise_to = float(m.group("raise_to"))
             amount = raise_to - street_commit[player]
             street_commit[player] = raise_to
-
         elif m.group("calls"):
             act = "CALL"
             amount = float(m.group("call_amt"))
             street_commit[player] += amount
-
         elif m.group("folds"):
             act = "FOLD"
-
         elif m.group("checks"):
             act = "CHECK"
 
@@ -152,174 +154,232 @@ def parse_actions(
                     "seat_no": seat_map.get(player, -1),
                     "act": act,
                     "amount": amount,
-                    "allin": 0,  # суффикс не используешь пока
+                    "allin": 0,
                 }
             )
             order_no += 1
     return actions, order_no
 
 
-def calculate_invested(actions: list[dict], hero_seat: int) -> float:
+def calculate_invested_voluntarily(actions: list[dict], hero_seat: int) -> float:
     """
-    Сколько реально ушло из-стека героя (H2N-логика):
-
-    • POST_SB / POST_BB копятся в buffer
-    • Как только встретили CALL / BET / RAISE —
-      считаем ход добровольным → добавляем buffer + сам amount
-    • Если добровольного действия так и не было, блайнды сгорают → invest = 0
+    Считает добровольно вложенные Hero деньги (CALL, BET, RAISE).
+    Для поля hero_invested (без блайндов, как в H2N "Invested $").
     """
-    posted_blinds = 0.0
     invested = 0.0
-    voluntary = False
-
     for a in actions:
-        if a["seat_no"] != hero_seat:
-            continue
-        if a["act"].startswith("POST_"):
-            posted_blinds += a["amount"] or 0.0
-        elif a["act"] in {"CALL", "BET", "RAISE"}:
-            voluntary = True
-            invested += a["amount"] or 0.0
+        if a["seat_no"] == hero_seat and a["act"] in {"CALL", "BET", "RAISE"}:
+            if a["amount"] is not None:
+                invested += a["amount"]
+    return round(invested, 2)
 
-    if voluntary:
-        invested += posted_blinds  # прибавляем посты только если был экшен
+
+def calculate_total_actual_investment(actions: list[dict], hero_seat: int) -> float:
+    """
+    • CALL / BET / RAISE  — всегда
+    • свой SB/BB/ANTE     — если Hero сделал ≥1 CALL/BET/RAISE в этой раздаче
+    • Uncalled bet вычитаем позже в parse_hand
+    """
+    hero_has_voluntary = any(
+        a["seat_no"] == hero_seat and a["act"] in {"CALL", "BET", "RAISE"} for a in actions
+    )
+
+    invested = 0.0
+    for a in actions:
+        if a["seat_no"] != hero_seat or a["amount"] is None:
+            continue
+
+        act = a["act"]
+        amt = a["amount"]
+
+        if act in {"CALL", "BET", "RAISE"}:
+            invested += amt
+        elif hero_has_voluntary and act in {"POST_SMALL_BLIND", "POST_BIG_BLIND", "POST_ANTE"}:
+            invested += amt
 
     return round(invested, 2)
 
 
 def parse_hand(raw: str) -> dict:
     """
-    Парсит одну HH в dict. hero_net = win-loss, как в H2N.
+    Парсит одну HH в словарь.
+    hero_invested — добровольные вложения (без блайндов).
+    hero_net — полный профит Hero (с учётом блайндов, для bb/100).
     """
     hero_uncalled = 0.0
-    hero_collected = 0.0  # ← собираем сумму забранную героем, потом вычтем затраты
+    hero_collected = 0.0
     collected_set = set()
     lines = [ln.rstrip() for ln in raw.splitlines() if ln.strip()]
 
-    m = RE_HAND_START.match(lines[0])
-    if not m:
-        raise ValueError("Bad HH header")
-    hand_id = m.group("hand_id")
-    bb = float(m.group("bb"))
-    date_iso = utc_iso(m.group("date"), m.group("time"))
+    m_header = RE_HAND_START.match(lines[0])
+    if not m_header:
+        raise ValueError("Ошибка: некорректный заголовок истории раздачи.")
+    hand_id = m_header.group("hand_id")
+    bb = float(m_header.group("bb"))
+    date_iso = utc_iso(m_header.group("date"), m_header.group("time"))
 
-    m_btn = next((RE_TABLE_BUTTON.match(ln) for ln in lines if "button" in ln.lower()), None)
-    button_seat = int(m_btn.group("button")) if m_btn else -1
+    m_btn_info = next((RE_TABLE_BUTTON.match(ln) for ln in lines if "button" in ln.lower()), None)
+    button_seat = int(m_btn_info.group("button")) if m_btn_info else -1
 
-    first_posts_idx = next((i for i, ln in enumerate(lines) if RE_POST_BLIND.match(ln)), len(lines))
-    seat_block = lines[2:first_posts_idx]
-    seat_map_name_to_num, seats, seat_map_num_to_name = parse_seat_block(seat_block)
+    first_action_or_cards_idx = next(
+        (i for i, ln in enumerate(lines) if RE_POST_BLIND.match(ln) or "*** HOLE CARDS ***" in ln),
+        len(lines),
+    )
+    seat_block_lines = lines[2:first_action_or_cards_idx]
+    seat_map_name_to_num, seats_info, seat_map_num_to_name = parse_seat_block(seat_block_lines)
 
-    # -- ищем Hero --
-    hero_player_key = None
+    hero_player_key: str | None = None
     hero_seat = -1
-    for s in seats:
-        if "Hero" in normalize_player_name(s["player_id"]):
-            hero_player_key = normalize_player_name(s["player_id"])
-            hero_seat = s["seat_no"]
+    for s_entry in seats_info:
+        if s_entry["player_id"] == "Hero":
+            hero_player_key = "Hero"
+            hero_seat = s_entry["seat_no"]
             break
-    if not hero_player_key:
+    if hero_player_key is None:
         hero_player_key = "Hero"
 
-    hero_cards = None
+    hero_cards_str: str | None = None
     for ln in lines:
-        m = RE_DEALT_HERO.match(ln)
-        if m:
-            hero_cards = m.group("card1") + m.group("card2")
+        m_hero_cards = RE_DEALT_HERO.match(ln)
+        if m_hero_cards:
+            hero_cards_str = m_hero_cards.group("card1") + m_hero_cards.group("card2")
             break
 
-    actions, showdowns = [], []
-    board_cards = {"FLOP": [], "TURN": [], "RIVER": []}
-    street_state, order_no = "PREFLOP", 0
-    street_lines: List[str] = []
+    all_actions: List[Dict[str, Any]] = []
+    showdown_entries: List[Dict[str, Any]] = []
+    board_cards_by_street: Dict[str, List[str]] = {"FLOP": [], "TURN": [], "RIVER": []}
+    current_street_state = "PREFLOP"
+    action_order_no = 0
+    current_street_lines: List[str] = []
 
-    RE_SHOWDOWN = re.compile(
+    RE_SHOWDOWN_LINE = re.compile(
         r"(?:Seat\s+(?P<seat>\d+):\s+)?(?P<player>\S+).*?show(?:ed|s)\s+\[(?P<card1>\w{2})\s+(?P<card2>\w{2})\]"
     )
 
-    for ln in lines:
-        if ln.startswith("***"):
-            if street_lines:
-                acts, order_no = parse_actions(
-                    street_lines, seat_map_name_to_num, street_state, order_no
+    for line_idx, ln in enumerate(lines):
+        if ln.startswith("***") and "HOLE CARDS" not in ln:
+            if current_street_lines:
+                acts, action_order_no = parse_actions(
+                    current_street_lines,
+                    seat_map_name_to_num,
+                    current_street_state,
+                    action_order_no,
                 )
-                actions.extend(acts)
-                street_lines = []
-            m_board = RE_STREET_BOARD.match(ln)
-            if m_board:
-                street_state = m_board.group("street")
-                cards = m_board.group("cards").split()
-                board_cards[street_state] = cards
-                if m_board.group("turnriver"):
-                    board_cards[street_state].append(m_board.group("turnriver"))
+                all_actions.extend(acts)
+                current_street_lines = []
+
+            m_board_line = RE_STREET_BOARD.match(ln)
+            if m_board_line:
+                current_street_state = m_board_line.group("street")
+                parsed_cards = m_board_line.group("cards").split()
+                board_cards_by_street[current_street_state] = parsed_cards
+                if m_board_line.group("turnriver"):
+                    board_cards_by_street[current_street_state].append(
+                        m_board_line.group("turnriver")
+                    )
                 continue
 
-        m_uncalled = RE_UNCALLED.match(ln)
-        if m_uncalled and normalize_player_name(m_uncalled.group("player")) == hero_player_key:
-            hero_uncalled += float(m_uncalled.group("amt"))
+        current_street_lines.append(ln)
 
-        # --- шоудаун ---
-        m_sd = RE_SHOWDOWN.search(ln)
-        if m_sd:
-            player = normalize_player_name(m_sd.group("player"))
-            cards = m_sd.group("card1") + m_sd.group("card2")
-            seat = seat_map_name_to_num.get(player, -1)
-            if seat == -1 and m_sd.group("seat"):
-                seat = int(m_sd.group("seat"))
-            if seat == -1:
+        m_uncalled_bet = RE_UNCALLED.match(ln)
+        if (
+            m_uncalled_bet
+            and normalize_player_name(m_uncalled_bet.group("player")) == hero_player_key
+        ):
+            hero_uncalled += float(m_uncalled_bet.group("amt"))
+
+        m_showdown = RE_SHOWDOWN_LINE.search(ln)
+        if m_showdown:
+            player_name = normalize_player_name(m_showdown.group("player"))
+            shown_cards = m_showdown.group("card1") + m_showdown.group("card2")
+            player_seat = seat_map_name_to_num.get(player_name, -1)
+            if player_seat == -1 and m_showdown.group("seat"):
+                try:
+                    player_seat = int(m_showdown.group("seat"))
+                except ValueError:
+                    player_seat = -1
+            if player_seat != -1 and not any(
+                s_entry["seat_no"] == player_seat for s_entry in showdown_entries
+            ):
+                showdown_entries.append({"seat_no": player_seat, "cards": shown_cards, "won": None})
+            elif player_seat == -1:
                 print(
-                    f"[WARN] Не найден seat_no для игрока '{player}' в руке {hand_id}, seat_map: {seat_map_name_to_num}"
+                    f"[ПРЕДУПРЕЖДЕНИЕ] Шоудаун: не найден seat_no для игрока '{player_name}' (исходное: '{m_showdown.group('player')}') в раздаче {hand_id}."
                 )
-                continue
-            if not any(s["seat_no"] == seat for s in showdowns):
-                showdowns.append({"seat_no": seat, "cards": cards, "won": None})
 
-        # --- hero_collected --- (а не hero_net!)
-        m_coll = RE_COLLECTED.match(ln)
-        m_won = RE_WON.match(ln)
-        m_sc = RE_SHOWS_COLLECTED.match(ln)
-        m_sw = RE_SEAT_WON.match(ln)
+        m_collected_pot = RE_COLLECTED.match(ln)
+        m_won_pot = RE_WON.match(ln)
+        m_shows_collected = RE_SHOWS_COLLECTED.match(ln)
+        m_seat_won = RE_SEAT_WON.match(ln)
+        collected_amount = None
+        winner_name = None
 
-        amt = None
-        if m_coll and normalize_player_name(m_coll.group("player")) == hero_player_key:
-            amt = float(m_coll.group("amt"))
-        elif m_won and normalize_player_name(m_won.group("player")) == hero_player_key:
-            amt = float(m_won.group("amt"))
-        elif m_sc:
-            amt = float(m_sc.group("amt"))
-        elif m_sw and normalize_player_name(m_sw.group("player")) == hero_player_key:
-            amt = float(m_sw.group("amt"))
+        if m_collected_pot:
+            winner_name = normalize_player_name(m_collected_pot.group("player"))
+            if winner_name == hero_player_key:
+                collected_amount = float(m_collected_pot.group("amt"))
+        elif m_won_pot:
+            winner_name = normalize_player_name(m_won_pot.group("player"))
+            if winner_name == hero_player_key:
+                collected_amount = float(m_won_pot.group("amt"))
+        elif m_shows_collected:
+            winner_name = hero_player_key
+            collected_amount = float(m_shows_collected.group("amt"))
+        elif m_seat_won:
+            winner_name = normalize_player_name(m_seat_won.group("player"))
+            if winner_name == hero_player_key:
+                collected_amount = float(m_seat_won.group("amt"))
 
-        if amt is not None and amt not in collected_set:
-            hero_collected += amt
-            collected_set.add(amt)
+        if (
+            collected_amount is not None
+            and winner_name == hero_player_key
+            and collected_amount not in collected_set
+        ):
+            hero_collected += collected_amount
+            collected_set.add(collected_amount)
 
-        street_lines.append(ln)
+    if current_street_lines:
+        acts, _ = parse_actions(
+            current_street_lines, seat_map_name_to_num, current_street_state, action_order_no
+        )
+        all_actions.extend(acts)
 
-    if street_lines:
-        acts, _ = parse_actions(street_lines, seat_map_name_to_num, street_state, order_no)
-        actions.extend(acts)
-
-    total_pot, rake, jackpot = None, 0.0, 0.0
+    total_pot_val, rake_val, jackpot_val = None, 0.0, 0.0
     for ln in lines:
-        m = RE_TOTAL_POT.search(ln)
-        if m:
-            total_pot = float(m.group("total"))
-            rake = float(m.group("rake"))
-            if m.group("jackpot"):
-                jackpot = float(m.group("jackpot"))
+        m_total_pot_info = RE_TOTAL_POT.search(ln)
+        if m_total_pot_info:
+            total_pot_val = float(m_total_pot_info.group("total"))
+            rake_val = float(m_total_pot_info.group("rake"))
+            if m_total_pot_info.group("jackpot"):
+                jackpot_val = float(m_total_pot_info.group("jackpot"))
             break
 
-    flop = "".join(board_cards["FLOP"])
-    turn = "".join(board_cards["TURN"][-1:])
-    river = "".join(board_cards["RIVER"][-1:])
-    board_str = "|".join(filter(None, [flop, turn, river]))
+    flop_str = "".join(board_cards_by_street["FLOP"])
+    turn_cards = board_cards_by_street["TURN"]
+    river_cards = board_cards_by_street["RIVER"]
 
-    hero_invested = calculate_invested(actions, hero_seat) - hero_uncalled
+    turn_card_str = ""
+    if len(turn_cards) > len(board_cards_by_street["FLOP"]):
+        turn_card_str = turn_cards[-1]
 
-    profit = round(hero_collected - hero_invested, 2)  # ← вот тут чистый win/loss!
+    river_card_str = ""
+    if len(river_cards) > len(turn_cards):
+        river_card_str = river_cards[-1]
+    elif not turn_card_str and len(river_cards) > len(board_cards_by_street["FLOP"]):
+        river_card_str = river_cards[-1]
 
-    hand_dict = {
+    board_string_representation = "|".join(filter(None, [flop_str, turn_card_str, river_card_str]))
+
+    # 1. Добровольно вложенное (без блайндов)
+    total_voluntary_sum_by_hero = calculate_invested_voluntarily(all_actions, hero_seat)
+    hero_invested_display_value = round(total_voluntary_sum_by_hero - hero_uncalled, 2)
+    # 2. Фактически вложено Hero (с учётом блайндов)
+    hero_total_investment = calculate_total_actual_investment(all_actions, hero_seat)
+    actual_hero_cost_for_hand = round(hero_total_investment - hero_uncalled, 2)
+    # 3. Profit
+    profit_for_hero = round(hero_collected - actual_hero_cost_for_hand, 2)
+
+    hand_data_dict = {
         "hand_id": hand_id,
         "site": "ggpoker",
         "game_type": "NLHE",
@@ -328,26 +388,49 @@ def parse_hand(raw: str) -> dict:
         "button_seat": button_seat,
         "hero_seat": hero_seat,
         "hero_name": hero_player_key,
-        "hero_cards": hero_cards,
-        "board": board_str,
-        "hero_invested": hero_invested,
-        "rake": rake,
-        "jackpot": jackpot,
-        "final_pot": total_pot,
-        "hero_net": profit,  # <-- только это поле используется дальше для bb/100 и profit!
-        "hero_showdown": int(any(s["seat_no"] == hero_seat for s in showdowns)),
-        "seats": seats,
-        "actions": actions,
-        "showdowns": showdowns,
+        "hero_cards": hero_cards_str,
+        "board": board_string_representation,
+        "hero_invested": hero_invested_display_value,
+        "rake": rake_val,
+        "jackpot": jackpot_val,
+        "final_pot": total_pot_val,
+        "hero_net": profit_for_hero,  # Чистый профит Hero (рассчитан от ПОЛНЫХ затрат, для bb/100)
+        "hero_showdown": int(any(s_entry["seat_no"] == hero_seat for s_entry in showdown_entries)),
+        "seats": seats_info,
+        "actions": all_actions,
+        "showdowns": showdown_entries,
     }
-    return hand_dict
+    return hand_data_dict
 
 
 def parse_file(path: str) -> List[Dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as f:
-        raw_text = f.read()
-    hands_raw = split_raw_hands(raw_text)
-    return [parse_hand(h) for h in hands_raw]
+    """Парсит все раздачи из файла."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw_text_content = f.read()
+    except FileNotFoundError:
+        print(f"Ошибка: Файл не найден по пути: {path}")
+        return []
+    except Exception as e:
+        print(f"Ошибка при чтении файла {path}: {e}")
+        return []
+
+    raw_hand_histories = split_raw_hands(raw_text_content)
+    parsed_hands = []
+    for i, h_text in enumerate(raw_hand_histories):
+        try:
+            parsed_hands.append(parse_hand(h_text))
+        except Exception as e:
+            hand_id_match = RE_HAND_START.match(
+                h_text.splitlines()[0] if h_text.splitlines() else ""
+            )
+            hand_id_str = (
+                hand_id_match.group("hand_id")
+                if hand_id_match
+                else f"Неизвестный ID, раздача #{i+1}"
+            )
+            print(f"Ошибка при парсинге раздачи {hand_id_str}: {e}")
+    return parsed_hands
 
 
 if __name__ == "__main__":
@@ -355,9 +438,33 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) > 1:
-        PATH = sys.argv[1]
+        FILE_PATH = sys.argv[1]
     else:
-        PATH = "bbline/assets/test_session.txt"
-    for hh in parse_file(PATH):
-        print(json.dumps(hh, indent=2))
-        print("-" * 80)
+        FILE_PATH = "bbline/assets/test_session.txt"
+        print(f"Путь к файлу не передан как аргумент, используется тестовый путь: {FILE_PATH}")
+
+    parsed_hands_list = parse_file(FILE_PATH)
+    if parsed_hands_list:
+        for hand_dict_result in parsed_hands_list:
+            print(json.dumps(hand_dict_result, indent=2))
+            print(
+                f"--- Hero Net для {hand_dict_result['hand_id']}: {hand_dict_result['hero_net']} ---"
+            )
+            print("-" * 80)
+
+        total_net = sum(h["hero_net"] for h in parsed_hands_list if h.get("hero_net") is not None)
+        num_hands = len(parsed_hands_list)
+        bb_size = (
+            parsed_hands_list[0]["limit_bb"]
+            if num_hands > 0 and parsed_hands_list[0].get("limit_bb")
+            else 0.02
+        )
+
+        if num_hands > 0 and bb_size > 0:
+            bb_per_100 = (total_net / num_hands) * (100 / bb_size)
+            print(f"\nОбщий hero_net: ${total_net:.2f}")
+            print(f"Количество раздач: {num_hands}")
+            print(f"Размер BB: ${bb_size:.2f}")
+            print(f"Примерный bb/100: {bb_per_100:.2f}")
+        else:
+            print("\nНедостаточно данных для расчета bb/100.")

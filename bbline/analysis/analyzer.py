@@ -43,21 +43,29 @@ def get_basic_stats() -> Dict[str, float]:
         # ---------------- базовые числа ----------------
         hands_cnt = _fetch_one(cur, "SELECT COUNT(*) FROM hands WHERE hero_seat IS NOT NULL;") or 0
         if hands_cnt == 0:
-            return {"hands_cnt": 0}
+            return {"hands_cnt": 0}  # Ранний выход, если рук нет
 
         profit = _fetch_one(cur, "SELECT SUM(hero_net) FROM hands;") or 0.0
 
-        bb_per_100 = (
-            _fetch_one(
-                cur,
-                """
-              SELECT  ROUND(AVG(net_bb) * 100, 2)
-              FROM    hands
-              WHERE   net_bb IS NOT NULL;
-            """,
+        # Получаем размер ББ. Предполагаем, что он одинаковый для всех рук в выборке.
+        # Если лимиты могут меняться, этот запрос нужно будет адаптировать или получать bb_size иначе.
+        bb_size_row = _fetch_one(
+            cur, "SELECT DISTINCT limit_bb FROM hands;"
+        )  # Убедимся, что лимит один
+        # Если лимитов несколько, нужно более сложное решение или выбрать один типичный.
+        # Для простоты, если лимит один:
+        bb_size = bb_size_row if isinstance(bb_size_row, (int, float)) else None
+        if (
+            bb_size is None
+        ):  # Попытка взять из первой руки, если DISTINCT вернул несколько или ничего
+            bb_size = _fetch_one(
+                cur, "SELECT limit_bb FROM hands WHERE hero_seat IS NOT NULL LIMIT 1;"
             )
-            or 0.0
-        )
+
+        if bb_size is not None and bb_size > 0:
+            bb_per_100 = round((profit / hands_cnt) * (100 / bb_size), 2)
+        else:
+            bb_per_100 = 0.0  # Или None, или вызвать ошибку, если bb_size не определен
 
         # ------------------- префлоп -------------------
         vpip = (
