@@ -1,6 +1,6 @@
 # bbline/analysis/rebuild_computed.py
 """
-Пересчитывает computed_stats + hero_rake, net_bb в 'hands'.
+Пересчитывает computed_stats + hero_collected, hero_rake, net_bb в 'hands'.
 Запуск:
     python -m bbline.analysis.rebuild_computed
 """
@@ -37,28 +37,55 @@ def rebuild() -> None:
             hand_id = h["hand_id"]
             hero_seat = h["hero_seat"]
             hero_net = h["hero_net"] or 0.0
-            hero_in = h["hero_invested"] or 0.0
+            # hero_in = h["hero_invested"] or 0.0   # если нужно, используй hero_in дальше по коду
             hero_sd = bool(h["hero_showdown"])
             rake_total = h["rake"] or 0.0
-            final_pot = h["final_pot"] or 0.0  # уже после рейка
+            # final_pot = h["final_pot"] or 0.0      # если нужно, используй final_pot дальше по коду
             bb = h["limit_bb"] or 0.02  # страхуемся
 
-            # --- корректная доля рейка героя ---
-            rakeable_pot = final_pot + rake_total  # до вычета
-            hero_rake = round(rake_total * (hero_in / rakeable_pot) if rakeable_pot else 0.0, 2)
+            # --- сколько собрал именно Hero ---
+            row = cur.execute(
+                """
+                SELECT SUM(amount) AS hero_sum
+                FROM collected
+                WHERE hand_id = ?
+                  AND seat_no  = ?
+                """,
+                (hand_id, hero_seat),
+            ).fetchone()
+            hero_collected = float(row["hero_sum"] or 0.0)
+
+            # --- сколько всего победители собрали ---
+            row = cur.execute(
+                """
+                SELECT SUM(amount) AS total_collected
+                FROM collected
+                WHERE hand_id = ?
+                """,
+                (hand_id,),
+            ).fetchone()
+            total_won = float(row["total_collected"] or 0.0)
+
+            # --- корректная доля рейка героя (H2N/HEM-стайл) ---
+            if rake_total > 0 and total_won > 0:
+                hero_rake = round(rake_total * (hero_collected / total_won), 4)
+            else:
+                hero_rake = 0.0
 
             # --- чистый профит и winrate ---
             profit = hero_net or 0.0  # hero_net уже «чистый»
             net_bb = round(profit / bb, 4)  # bb > 0 гарантирован
+
             # обновляем руки
             cur.execute(
                 """
                 UPDATE hands
-                   SET hero_rake = ?,
-                       net_bb    = ?
-                 WHERE hand_id   = ?;
+                   SET hero_collected = ?,
+                       hero_rake      = ?,
+                       net_bb         = ?
+                 WHERE hand_id        = ?;
             """,
-                (hero_rake, net_bb, hand_id),
+                (hero_collected, hero_rake, net_bb, hand_id),
             )
 
             # ---------------- computed_stats -------------
@@ -143,7 +170,9 @@ def rebuild() -> None:
 
         cx.commit()
 
-    print(f"✅  пересчитали computed_stats + winrate для {len(hands)} рук")
+    print(
+        f"✅  пересчитали computed_stats + hero_collected + hero_rake + winrate для {len(hands)} рук"
+    )
 
 
 if __name__ == "__main__":

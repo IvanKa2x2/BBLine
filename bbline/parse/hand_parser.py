@@ -13,6 +13,9 @@ import re
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
+from pathlib import Path
+import sqlite3
+
 
 # ---------- компилируем часто используемые regex’ы ----------
 RE_HAND_START = re.compile(
@@ -52,11 +55,15 @@ RE_SUMMARY_SHOW = re.compile(
 RE_UNCALLED = re.compile(r"Uncalled bet \(\$(?P<amt>\d+\.\d+)\) returned to (?P<player>.+)")
 RE_COLLECTED = re.compile(r"^(?P<player>.+?) collected \$?(?P<amt>\d+\.\d+) from pot")
 RE_WON = re.compile(r"^(?P<player>.+?) won \(\$(?P<amt>\d+\.\d+)\)")
-RE_SEAT_WON = re.compile(r"^Seat\s+\d+:\s+(?P<player>.+?)\s+won\s+\(\$(?P<amt>\d+\.\d+)\)")
 RE_SHOWS_COLLECTED = re.compile(r"^Hero: shows .*? collected \$?(?P<amt>\d+\.\d+)")
 RE_TOTAL_POT = re.compile(
     r"Total pot \$?(?P<total>\d+\.\d+) \| Rake \$?(?P<rake>\d+\.\d+).*?(?:Jackpot \$?(?P<jackpot>\d+\.\d+))?"
 )
+# «Seat 3: Hero (button) collected ($1.40)»
+RE_SEAT_COLLECTED = re.compile(
+    r"^Seat\s+(?P<seat>\d+):\s+(?P<player>[^(]+?)\s*(\([^)]+\))?\s*collected\s+\(\$(?P<amt>\d+\.\d+)\)"
+)
+RE_SEAT_WON = re.compile(r"^Seat\s+\d+:\s+(?P<player>.+?)\s+won\s+\(\$(?P<amt>\d+\.\d+)\)")
 
 
 # ------------------------------------------------------------
@@ -208,7 +215,10 @@ def parse_hand(raw: str) -> dict:
     """
     hero_uncalled = 0.0
     hero_collected = 0.0
-    collected_set = set()
+    winners_total = 0.0
+    winners_rows = []
+    collected_set_total = set()  # пары (player, amount)
+    collected_set_hero = set()  # чтобы дважды не добавить героя
     lines = [ln.rstrip() for ln in raw.splitlines() if ln.strip()]
 
     m_header = RE_HAND_START.match(lines[0])
@@ -310,33 +320,42 @@ def parse_hand(raw: str) -> dict:
         m_collected_pot = RE_COLLECTED.match(ln)
         m_won_pot = RE_WON.match(ln)
         m_shows_collected = RE_SHOWS_COLLECTED.match(ln)
+        m_seat_collected = RE_SEAT_COLLECTED.match(ln)
         m_seat_won = RE_SEAT_WON.match(ln)
         collected_amount = None
         winner_name = None
 
         if m_collected_pot:
             winner_name = normalize_player_name(m_collected_pot.group("player"))
-            if winner_name == hero_player_key:
-                collected_amount = float(m_collected_pot.group("amt"))
+            collected_amount = float(m_collected_pot.group("amt"))
         elif m_won_pot:
             winner_name = normalize_player_name(m_won_pot.group("player"))
-            if winner_name == hero_player_key:
-                collected_amount = float(m_won_pot.group("amt"))
+            collected_amount = float(m_won_pot.group("amt"))
         elif m_shows_collected:
             winner_name = hero_player_key
             collected_amount = float(m_shows_collected.group("amt"))
+        elif m_seat_collected:
+            winner_name = normalize_player_name(m_seat_collected.group("player"))
+            collected_amount = float(m_seat_collected.group("amt"))
         elif m_seat_won:
             winner_name = normalize_player_name(m_seat_won.group("player"))
-            if winner_name == hero_player_key:
-                collected_amount = float(m_seat_won.group("amt"))
+            collected_amount = float(m_seat_won.group("amt"))
+        else:
+            collected_amount = None
 
-        if (
-            collected_amount is not None
-            and winner_name == hero_player_key
-            and collected_amount not in collected_set
-        ):
-            hero_collected += collected_amount
-            collected_set.add(collected_amount)
+        if collected_amount is not None:
+            key = (winner_name, collected_amount)
+            if key in collected_set_total:
+                continue
+            collected_set_total.add(key)
+            winners_total += collected_amount
+            seat_no = seat_map_name_to_num.get(winner_name, -1)
+            if seat_no != -1:
+                winners_rows.append((hand_id, seat_no, collected_amount))
+
+            if winner_name == hero_player_key and key not in collected_set_hero:
+                hero_collected += collected_amount
+                collected_set_hero.add(key)
 
     if current_street_lines:
         acts, _ = parse_actions(
@@ -378,6 +397,11 @@ def parse_hand(raw: str) -> dict:
     actual_hero_cost_for_hand = round(hero_total_investment - hero_uncalled, 2)
     # 3. Profit
     profit_for_hero = round(hero_collected - actual_hero_cost_for_hand, 2)
+    # ------- HERO RAKE (доля от общего рейка) -------
+    if winners_total > 0:
+        hero_rake = round(rake_val * (hero_collected / winners_total), 4)
+    else:
+        hero_rake = 0.0
 
     hand_data_dict = {
         "hand_id": hand_id,
@@ -391,6 +415,8 @@ def parse_hand(raw: str) -> dict:
         "hero_cards": hero_cards_str,
         "board": board_string_representation,
         "hero_invested": hero_invested_display_value,
+        "hero_collected": hero_collected,
+        "hero_rake": hero_rake,
         "rake": rake_val,
         "jackpot": jackpot_val,
         "final_pot": total_pot_val,
@@ -399,6 +425,7 @@ def parse_hand(raw: str) -> dict:
         "seats": seats_info,
         "actions": all_actions,
         "showdowns": showdown_entries,
+        "collected_rows": winners_rows,
     }
     return hand_data_dict
 
@@ -433,6 +460,26 @@ def parse_file(path: str) -> List[Dict[str, Any]]:
     return parsed_hands
 
 
+def insert_hands_and_collected(parsed_hands, db_path):
+    print(f"Пишу в БД: {db_path}")
+    cx = sqlite3.connect(db_path)
+    cur = cx.cursor()
+    for h in parsed_hands:
+        # Если у тебя есть отдельная логика записи рук в таблицу hands — вызывай её тут тоже!
+        # cur.execute(...)   # <-- твоя вставка раздачи в hands, если надо
+        # Сохраняем победителей в collected
+        if h.get("collected_rows"):
+            cur.executemany(
+                """
+                INSERT OR IGNORE INTO collected (hand_id, seat_no, amount)
+                VALUES (?, ?, ?)
+                """,
+                h["collected_rows"],
+            )
+    cx.commit()
+    cx.close()
+
+
 if __name__ == "__main__":
     import json
     import sys
@@ -442,8 +489,10 @@ if __name__ == "__main__":
     else:
         FILE_PATH = "bbline/assets/test_session.txt"
         print(f"Путь к файлу не передан как аргумент, используется тестовый путь: {FILE_PATH}")
-
+    DB_PATH = Path(__file__).resolve().parents[1] / "database" / "bbline.sqlite"
     parsed_hands_list = parse_file(FILE_PATH)
+    insert_hands_and_collected(parsed_hands_list, str(DB_PATH))
+    print("✅  winners_rows записаны в collected")
     if parsed_hands_list:
         for hand_dict_result in parsed_hands_list:
             print(json.dumps(hand_dict_result, indent=2))

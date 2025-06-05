@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS hands (
     hero_cards    TEXT,                    -- ‘5s9s’
     board         TEXT,                    -- ‘6hQc8h|8c|3d’
     hero_invested REAL,
+    hero_collected REAL,
     hero_rake     REAL,
     rake          REAL    DEFAULT 0,
     jackpot       REAL    DEFAULT 0,
@@ -118,6 +119,16 @@ CREATE TABLE IF NOT EXISTS computed_stats (
     wt_sd        INTEGER,
     w_sd         INTEGER
 );
+
+/* 9. collected - таблица с победителями */
+CREATE TABLE IF NOT EXISTS collected (
+    hand_id  TEXT    NOT NULL,
+    seat_no  INTEGER NOT NULL,
+    amount   REAL    NOT NULL,
+    PRIMARY KEY (hand_id, seat_no, amount)   -- ← добавил amount: игрок может собрать пару разных банков
+);
+
+
 
 /* --------- полезные индексы для скорости отчётов ---------- */
 CREATE INDEX IF NOT EXISTS idx_actions_hand_street ON actions(hand_id, street);

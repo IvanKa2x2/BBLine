@@ -81,6 +81,16 @@ def insert_hand(hand):
                 sd.get("won", 0.0),  # ← ставим 0.0 вместо None
             ),
         )
+    # 5. collected — победители
+    winners_rows = hand.get("collected_rows", [])
+    if winners_rows:
+        cur.executemany(
+            """
+            INSERT OR IGNORE INTO collected (hand_id, seat_no, amount)
+            VALUES (?, ?, ?)
+            """,
+            winners_rows,
+        )
 
     conn.commit()
     conn.close()
