@@ -24,21 +24,11 @@ dev = [
 ]
 
 [project.scripts]
-bbline = "bbline:app"
+# bbline = "bbline:app"  # если у вас нет app.py, закомментируйте или удалите
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-# Говорим setuptools, что код в src/
-package-dir = {"" = "src"}
-packages = ["analysis", "core", "db", "export", "reports"]
-# Если export и reports нужны как импорты, иначе можно не включать
-
-[tool.setuptools.package-data]
-# если нужны статические файлы внутри analysis, core и т.п.
-# "analysis" = ["*.sql", "*.txt"]
 
 [tool.ruff]
 # Настройки для ruff (линтер)

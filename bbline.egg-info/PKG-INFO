@@ -1,3 +1,17 @@
+Metadata-Version: 2.4
+Name: bbline
+Version: 0.1.0
+Summary: Poker hand analyzer (Hand2Note-lite, чистый анализ твоей игры)
+Author: Ledonec22
+Author-email: Ledonec22 <your@email.com>
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: typer>=0.9
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Requires-Dist: black; extra == "dev"
+
 Вот обновлённый `README.md` — с учётом твоих последних доработок и акцента на **Streamlit Dashboard**, правильные метрики (WTSD, WWSF и пр.), пошаговый запуск и стиль проекта.
 
 ---

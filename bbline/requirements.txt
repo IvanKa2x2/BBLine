@@ -1,6 +1,11 @@
-pandas
-duckdb
-sqlalchemy
+pandas>=2.2.0
+duckdb>=0.9.2
+sqlalchemy>=2.0.25
 typer>=0.9.0
-rich
-sqlite-utils
+rich>=13.7.0
+sqlite-utils>=3.35.2
+numpy>=1.26.3
+matplotlib>=3.8.2
+seaborn>=0.13.1
+python-dotenv>=1.0.0
+streamlit>=1.31.0
