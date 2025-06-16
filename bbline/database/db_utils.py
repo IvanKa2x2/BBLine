@@ -6,18 +6,22 @@ from pathlib import Path
 DB_PATH = Path(__file__).with_name("bbline.sqlite")
 
 
-def insert_hand(hand):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    # 1. hands
+def insert_hand(hand: dict, cx: sqlite3.Connection | None = None) -> bool:
+    """True -> вставили новую руку, False -> дубликат"""
+    own_conn = cx is None
+    if own_conn:
+        cx = sqlite3.connect(DB_PATH)
+    cur = cx.cursor()
+
     cur.execute(
         """
-        INSERT OR REPLACE INTO hands (
+        INSERT OR IGNORE INTO hands (
             hand_id, site, game_type, limit_bb, datetime_utc,
-            button_seat, hero_seat, hero_name, hero_cards,
-            board, hero_invested, rake, jackpot, final_pot,
-            hero_net, hero_showdown
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            button_seat, hero_seat, hero_name, hero_cards, board,
+            hero_invested, hero_collected, hero_rake, rake, jackpot,
+            final_pot, hero_net, hero_showdown
+        )
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
         """,
         (
             hand["hand_id"],
@@ -30,67 +34,56 @@ def insert_hand(hand):
             hand["hero_name"],
             hand["hero_cards"],
             hand["board"],
-            hand["hero_invested"],  # ← добавили
+            hand["hero_invested"],
+            hand["hero_collected"],
+            hand["hero_rake"],
             hand["rake"],
             hand["jackpot"],
             hand["final_pot"],
-            hand.get("hero_net"),
-            hand.get("hero_showdown", 0),
+            hand["hero_net"],
+            hand["hero_showdown"],
         ),
     )
+    inserted = cur.rowcount == 1  # <-- золото
+    if inserted:
+        # пишем в связанные таблицы seats, actions, collected, showdowns
+        for seat in hand["seats"]:
+            cur.execute(
+                "INSERT OR REPLACE INTO seats (hand_id, seat_no, player_id, chips) VALUES (?,?,?,?);",
+                (hand["hand_id"], seat["seat_no"], seat["player_id"], seat["chips"]),
+            )
+        for action in hand["actions"]:
+            cur.execute(
+                "INSERT INTO actions (hand_id, street, order_no, seat_no, act, amount, allin) VALUES (?,?,?,?,?,?,?);",
+                (
+                    hand["hand_id"],
+                    action["street"],
+                    action["order_no"],
+                    action["seat_no"],
+                    action["act"],
+                    action["amount"],
+                    action["allin"],
+                ),
+            )
+        for collected_row in hand["collected_rows"]:
+            cur.execute(
+                "INSERT INTO collected (hand_id, seat_no, amount) VALUES (?,?,?);",
+                (hand["hand_id"], collected_row["seat_no"], collected_row["amount"]),
+            )
+        for showdown in hand["showdowns"]:
+            cur.execute(
+                "INSERT INTO showdowns (hand_id, seat_no, player_id, cards, is_winner, won_amount) VALUES (?,?,?,?,?,?);",
+                (
+                    hand["hand_id"],
+                    showdown["seat_no"],
+                    showdown["player_id"],
+                    showdown["cards"],
+                    showdown["is_winner"],
+                    showdown["won_amount"],
+                ),
+            )
 
-    # 2. seats
-    for seat in hand["seats"]:
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO seats (hand_id, seat_no, player_id, chips)
-            VALUES (?, ?, ?, ?)
-        """,
-            (hand["hand_id"], seat["seat_no"], seat["player_id"], seat["chips"]),
-        )
-
-    # 3. actions
-    for action in hand["actions"]:
-        cur.execute(
-            """
-            INSERT INTO actions (hand_id, street, order_no, seat_no, act, amount, allin)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-            (
-                hand["hand_id"],
-                action["street"],
-                action["order_no"],
-                action["seat_no"],
-                action["act"],
-                action.get("amount"),
-                action.get("allin", 0),
-            ),
-        )
-    cur.execute("PRAGMA foreign_keys = ON;")
-    # 4. showdowns
-    for sd in hand.get("showdowns", []):
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO showdowns (hand_id, seat_no, cards, won)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                hand["hand_id"],
-                sd["seat_no"],
-                sd["cards"],
-                sd.get("won", 0.0),  # ← ставим 0.0 вместо None
-            ),
-        )
-    # 5. collected — победители
-    winners_rows = hand.get("collected_rows", [])
-    if winners_rows:
-        cur.executemany(
-            """
-            INSERT OR IGNORE INTO collected (hand_id, seat_no, amount)
-            VALUES (?, ?, ?)
-            """,
-            winners_rows,
-        )
-
-    conn.commit()
-    conn.close()
+    if own_conn:
+        cx.commit()
+        cx.close()
+    return inserted

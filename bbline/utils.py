@@ -41,9 +41,8 @@ def _validate_positions(positions: List[str]) -> bool:
 
 def _pos_from_seats(hero_seat: int, button_seat: int) -> str:
     """Возвращает позицию героя по номерам мест (6-max)."""
-    positions = ["BTN", "SB", "BB", "UTG", "MP", "CO"]
     offset = (hero_seat - button_seat) % 6
-    return positions[offset]
+    return POSITIONS[offset]
 
 
 def get_hand_ids(

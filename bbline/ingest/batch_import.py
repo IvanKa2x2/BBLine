@@ -8,15 +8,25 @@ batch_import.py — пакетный импорт HH в базу BBLine
 - Игнорирует файлы, которые уже были импортированы (по hand_id).
 - После каждого файла пишет короткий итог.
 - Можно использовать для ежедневного/массового импорта архивов.
+- Удаляет файлы после успешного импорта.
 """
 
 import sys
+import os
 from pathlib import Path
 from bbline.parse.hand_parser import parse_file
 from bbline.database.db_utils import insert_hand
 
 
 def batch_import(folder, ext=".txt", db_path=None):
+    """
+    Импортирует файлы с историей рук в базу данных.
+
+    Args:
+        folder (str): Путь к папке с файлами
+        ext (str): Расширение файлов для импорта
+        db_path (str): Путь к базе данных
+    """
     folder = Path(folder)
     files = list(folder.glob(f"*{ext}"))
     if not files:
@@ -24,57 +34,55 @@ def batch_import(folder, ext=".txt", db_path=None):
         return
 
     total, skipped, imported = 0, 0, 0
-    all_collected_rows = []  # Сюда складываем winners_rows
+    deleted_files = 0
 
     for file in files:
+        file_imported, file_skipped = 0, 0
         try:
             hands = parse_file(str(file))
+
+            for hand in hands:
+                total += 1
+                try:
+                    res = insert_hand(hand)
+                    status = "OK" if res else "dup"
+                    print(f"  {hand['hand_id']} ... {status}")
+                    if res:
+                        imported += 1
+                        file_imported += 1
+                    else:
+                        skipped += 1
+                        file_skipped += 1
+                except Exception as e:
+                    print(f"[ERR] Не удалось вставить {hand.get('hand_id')} — {e}")
+
+            # Удаляем файл только если в этом конкретном файле не было дублей
+            if file_imported > 0 and file_skipped == 0:
+                try:
+                    os.remove(file)
+                    deleted_files += 1
+                    print(f"✅ Файл {file.name} успешно импортирован и удален")
+                except Exception as e:
+                    print(f"[ERR] Не удалось удалить файл {file}: {e}")
+
         except Exception as e:
             print(f"[ERR] Не удалось разобрать {file}: {e}")
             continue
 
-        for hand in hands:
-            total += 1
-            try:
-                res = insert_hand(hand)
-                if res:
-                    imported += 1
-                    # winners_rows = hand["collected_rows"]   # старое имя
-                    winners_rows = hand.get("collected_rows", [])
-                    all_collected_rows.extend(winners_rows)
-                else:
-                    skipped += 1
-            except Exception as e:
-                print(f"[ERR] Не удалось вставить {hand.get('hand_id')} — {e}")
-
-    # Запишем всю кучу winners_rows в collected одним махом (если есть)
-    if db_path and all_collected_rows:
-        import sqlite3
-
-        print(f"Вставляю {len(all_collected_rows)} записей в collected...")
-        with sqlite3.connect(db_path) as cx:
-            cur = cx.cursor()
-            cur.executemany(
-                """
-                INSERT OR IGNORE INTO collected (hand_id, seat_no, amount)
-                VALUES (?, ?, ?)
-                """,
-                all_collected_rows,
-            )
-            cx.commit()
-        print("✅  winners_rows успешно записаны в collected")
-
     print("\n=== Batch импорт завершён ===")
     print(
-        f"Итого файлов: {len(files)} | Рук всего: {total} | Новых: {imported} | Дубликатов: {skipped}"
+        f"Итого файлов: {len(files)} | Рук всего: {total} | Новых: {imported} | "
+        f"Пропущено (уже в базе): {skipped} | Удалено файлов: {deleted_files}"
     )
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Используй: python -m bbline.ingest.batch_import <папка_с_HH> [--ext .txt]")
-        sys.exit(1)
-    folder = sys.argv[1]
+    # if len(sys.argv) < 2:
+    #     print("Используй: python -m bbline.ingest.batch_import <папка_с_HH> [--ext .txt]")
+    #     sys.exit(1)
+    folder = (
+        r"C:\Users\GameBase\BBLine\bbline\assets\raw"  # Прописываем папку с раздачами на постоянку
+    )
     ext = ".txt"
     db_path = str(Path(__file__).resolve().parents[2] / "database" / "bbline.sqlite")
     if len(sys.argv) > 2 and sys.argv[2].startswith("--ext"):

@@ -4,6 +4,7 @@ setup.cfg
 setup.py
 bbline/__init__.py
 bbline/dashboard_data.py
+bbline/hands_table.py
 bbline/main.py
 bbline/utils.py
 bbline.egg-info/PKG-INFO
