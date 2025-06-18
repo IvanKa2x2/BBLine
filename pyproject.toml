@@ -1,6 +1,6 @@
 [project]
 name = "bbline"
-version = "0.1.0"
+version = "0.2.0"
 description = "Poker hand analyzer (Hand2Note-lite, чистый анализ твоей игры)"
 authors = [
     {name = "Ledonec22", email = "your@email.com"}

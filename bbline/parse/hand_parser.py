@@ -17,7 +17,7 @@ from pathlib import Path
 import sqlite3
 
 
-# ---------- компилируем часто используемые regex’ы ----------
+# ---------- компилируем часто используемые regex'ы ----------
 RE_HAND_START = re.compile(
     r"^Poker Hand #(?P<hand_id>\w+): Hold'em No Limit "
     r"\(\$(?P<sb>\d+\.\d+)/\$(?P<bb>\d+\.\d+)\) - "
@@ -461,23 +461,68 @@ def parse_file(path: str) -> List[Dict[str, Any]]:
 
 
 def insert_hands_and_collected(parsed_hands, db_path):
+    """
+    Вставляет раздачи и данные о выигрышах в базу данных.
+
+    Args:
+        parsed_hands: Список словарей с данными раздач
+        db_path: Путь к файлу базы данных
+
+    Raises:
+        sqlite3.Error: При ошибках работы с БД
+        ValueError: При неверном формате данных
+    """
     print(f"Пишу в БД: {db_path}")
-    cx = sqlite3.connect(db_path)
-    cur = cx.cursor()
-    for h in parsed_hands:
-        # Если у тебя есть отдельная логика записи рук в таблицу hands — вызывай её тут тоже!
-        # cur.execute(...)   # <-- твоя вставка раздачи в hands, если надо
-        # Сохраняем победителей в collected
-        if h.get("collected_rows"):
-            cur.executemany(
-                """
-                INSERT OR IGNORE INTO collected (hand_id, seat_no, amount)
-                VALUES (?, ?, ?)
-                """,
-                h["collected_rows"],
-            )
-    cx.commit()
-    cx.close()
+    cx = None
+    try:
+        cx = sqlite3.connect(db_path, timeout=30.0)  # Увеличиваем таймаут
+        cur = cx.cursor()
+
+        for h in parsed_hands:
+            if not isinstance(h, dict):
+                raise ValueError(f"Неверный формат данных раздачи: {type(h)}")
+
+            # Проверяем наличие hand_id
+            if "hand_id" not in h:
+                raise ValueError("Отсутствует hand_id в данных раздачи")
+
+            # Проверяем формат collected_rows
+            if "collected_rows" in h:
+                if not isinstance(h["collected_rows"], list):
+                    raise ValueError(
+                        f"collected_rows должен быть списком, получен {type(h['collected_rows'])}"
+                    )
+
+                # Проверяем формат каждой записи
+                for row in h["collected_rows"]:
+                    if not isinstance(row, (list, tuple)) or len(row) != 3:
+                        raise ValueError(f"Неверный формат записи в collected_rows: {row}")
+                    if not isinstance(row[0], str):
+                        raise ValueError(f"hand_id должен быть строкой, получен {type(row[0])}")
+                    if not isinstance(row[1], int):
+                        raise ValueError(
+                            f"seat_no должен быть целым числом, получен {type(row[1])}"
+                        )
+                    if not isinstance(row[2], (int, float)):
+                        raise ValueError(f"amount должен быть числом, получен {type(row[2])}")
+
+                # Вставляем данные о выигрышах
+                cur.executemany(
+                    """
+                    INSERT OR IGNORE INTO collected (hand_id, seat_no, amount)
+                    VALUES (?, ?, ?)
+                    """,
+                    h["collected_rows"],
+                )
+
+    except sqlite3.Error as e:
+        if cx:
+            cx.rollback()
+        raise sqlite3.Error(f"Ошибка при записи в БД: {str(e)}")
+    finally:
+        if cx:
+            cx.commit()
+            cx.close()
 
 
 if __name__ == "__main__":

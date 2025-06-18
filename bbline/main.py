@@ -2,11 +2,13 @@ import datetime as dt
 import streamlit as st
 import pandas as pd
 import sqlite3
+import json
 from bbline.dashboard_data import get_dashboard_stats, get_profit_by_date
-from bbline.utils import DB_PATH
+from bbline.utils import DB_PATH, _pos_from_seats
 from bbline.analysis.leakfinder import run_leakfinder, get_example_hands
 from bbline.hands_table import fetch_hands_df
 from bbline.replayer.replay_one import display_hand_replay
+from bbline.export.json_export import get_hand_compact
 
 st.set_page_config(page_title="BBLine Poker", layout="wide")
 
@@ -28,7 +30,9 @@ positions = ["BB", "SB", "BTN", "CO", "MP", "EP"]
 pos_sel = st.sidebar.multiselect("Позиции hero", positions, default=positions)
 
 # --- main content ---------------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🚨 LeakFinder", "📋 Список рук", "🂡 Реплеер"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📊 Dashboard", "🚨 LeakFinder", "📋 Список рук", "🂡 Реплеер", "📤 JSON Export"]
+)
 
 # Получаем hand_id из query_params для реплеера
 query_hand_id = st.query_params.get("hand_id", None)
@@ -188,3 +192,44 @@ with tab4:
         display_hand_replay(selected_hand_id)
     else:
         st.info("Выберите Hand ID для отображения раздачи.")
+
+with tab5:
+    st.header("📤 Экспорт раздач в JSON")
+
+    # Получаем список последних раздач с учетом фильтров
+    with sqlite3.connect(DB_PATH) as cx:
+        # Сначала получаем все раздачи с учетом дат и лимитов
+        query = """
+            SELECT h.hand_id, h.hero_seat, h.button_seat
+            FROM hands h
+            WHERE date(h.datetime_utc) BETWEEN ? AND ?
+            AND h.limit_bb IN ({})
+            ORDER BY h.datetime_utc DESC 
+            LIMIT 100
+        """.format(
+            ",".join("?" * len(limit_sel))
+        )
+
+        params = [str(date_from), str(date_to)] + limit_sel
+        rows = cx.execute(query, params).fetchall()
+
+        # Фильтруем по позициям в Python
+        hand_ids = []
+        for row in rows:
+            pos = _pos_from_seats(row[1], row[2])  # hero_seat, button_seat
+            if pos in pos_sel:
+                hand_ids.append(row[0])
+            if len(hand_ids) >= 20:  # Ограничиваем количество раздач
+                break
+
+    if not hand_ids:
+        st.info("Нет раздач для отображения по выбранным фильтрам.")
+    else:
+        for hand_id in hand_ids:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.write(f"Раздача: {hand_id}")
+            with col2:
+                if st.button("📋 JSON для GPT", key=f"json_{hand_id}"):
+                    data = get_hand_compact(hand_id)
+                    st.code(json.dumps(data, ensure_ascii=False, indent=2), language="json")
